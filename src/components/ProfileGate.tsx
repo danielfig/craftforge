@@ -1,16 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { PlayerId, PlayerProfile } from '../types';
 import { AVATARS } from '../assets/textures';
+import { SyncStatus } from '../store/itemStore';
 import { playSound } from '../utils/sounds';
 
 export interface ProfileGateProps {
-  players: Record<PlayerId, PlayerProfile>;
   realmCode: string;
-  onSelectPlayer: (
-    playerId: PlayerId,
-    updatedPlayers: Record<PlayerId, PlayerProfile>,
-    realmCode: string
-  ) => void;
+  syncStatus: SyncStatus;
+  onOpenSyncModal: () => void;
+  onOpenRealmInvite?: (initialTab: 'create' | 'invite') => void;
+  onLogin: (params: {
+    name: string;
+    pin: string;
+    avatarId: string;
+    realmCode: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
 }
 
 const SPLASH_TEXTS = [
@@ -20,32 +23,24 @@ const SPLASH_TEXTS = [
   'Pixel Powered!',
   'Enchanted Fun!',
   'Double Chest Ready!',
-  '3+ Players Welcome!',
+  'PIN Protected!',
 ];
-
-const PLAYER_ACCENT_COLORS = [
-  '#3b8526',
-  '#2d7dd2',
-  '#9b59b6',
-  '#d97706',
-  '#e11d48',
-  '#0d9488',
-];
-
-const PLAY_BTN_CLASSES = ['mc-btn-green', 'mc-btn-gold', 'mc-btn-purple'];
 
 export const ProfileGate: React.FC<ProfileGateProps> = ({
-  players,
   realmCode,
-  onSelectPlayer,
+  syncStatus,
+  onOpenSyncModal,
+  onOpenRealmInvite,
+  onLogin,
 }) => {
-  const [localPlayers, setLocalPlayers] = useState<Record<PlayerId, PlayerProfile>>(players);
+  const [name, setName] = useState<string>('');
+  const [pin, setPin] = useState<string>('');
+  const [showPin, setShowPin] = useState<boolean>(false);
+  const [avatarIdx, setAvatarIdx] = useState<number>(0);
   const [localRealm, setLocalRealm] = useState<string>(realmCode || 'FAMILY-CRAFT');
   const [splashIndex, setSplashIndex] = useState<number>(0);
-
-  useEffect(() => {
-    setLocalPlayers(players);
-  }, [players]);
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [error, setError] = useState<string>('');
 
   useEffect(() => {
     if (realmCode) {
@@ -53,102 +48,74 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
     }
   }, [realmCode]);
 
-  const playerList = Object.values(localPlayers);
+  const currentAvatar =
+    AVATARS && AVATARS.length > 0 ? AVATARS[avatarIdx % AVATARS.length] : null;
 
-  const getAvatarIndex = (avatarId: string): number => {
-    if (!AVATARS || AVATARS.length === 0) return 0;
-    const idx = AVATARS.findIndex((a) => a.id === avatarId);
-    return idx >= 0 ? idx : 0;
-  };
-
-  const handleCycleAvatar = (playerId: PlayerId, delta: number) => {
+  const handleCycleAvatar = (delta: number) => {
     if (!AVATARS || AVATARS.length === 0) return;
     playSound('click');
-    setLocalPlayers((prev) => {
-      const current = prev[playerId];
-      if (!current) return prev;
-      const currentIdx = getAvatarIndex(current.avatarId);
-      const nextIdx = (currentIdx + delta + AVATARS.length) % AVATARS.length;
-      return {
-        ...prev,
-        [playerId]: {
-          ...current,
-          avatarId: AVATARS[nextIdx].id,
-        },
-      };
-    });
-  };
-
-  const handleNameChange = (playerId: PlayerId, name: string) => {
-    setLocalPlayers((prev) => {
-      const current = prev[playerId];
-      if (!current) return prev;
-      return {
-        ...prev,
-        [playerId]: {
-          ...current,
-          name,
-        },
-      };
-    });
-  };
-
-  const handleAddPlayer = () => {
-    playSound('click');
-    setLocalPlayers((prev) => {
-      let nextNum = 3;
-      while (prev[`player${nextNum}`]) {
-        nextNum += 1;
-      }
-      const newId: PlayerId = `player${nextNum}`;
-      const existingList = Object.values(prev);
-      const usedAvatarIds = new Set(existingList.map((p) => p.avatarId));
-      const nextAvatar =
-        AVATARS.find((a) => !usedAvatarIds.has(a.id)) ||
-        AVATARS[existingList.length % Math.max(1, AVATARS.length)];
-      const nextColor =
-        PLAYER_ACCENT_COLORS[existingList.length % PLAYER_ACCENT_COLORS.length];
-
-      return {
-        ...prev,
-        [newId]: {
-          id: newId,
-          name: `Player ${nextNum}`,
-          avatarId: nextAvatar ? nextAvatar.id : 'knight',
-          color: nextColor,
-        },
-      };
-    });
-  };
-
-  const handleRemovePlayer = (playerId: PlayerId) => {
-    if (playerList.length <= 2) return;
-    playSound('click');
-    setLocalPlayers((prev) => {
-      const next = { ...prev };
-      delete next[playerId];
-      return next;
-    });
-  };
-
-  const handlePlay = (playerId: PlayerId) => {
-    playSound('click');
-    const cleanRealm = localRealm.trim().toUpperCase() || 'FAMILY-CRAFT';
-    const sanitizedPlayers: Record<PlayerId, PlayerProfile> = {};
-    Object.values(localPlayers).forEach((profile, idx) => {
-      const fallbackName = idx === 0 ? 'Dad' : idx === 1 ? 'Son' : `Player ${idx + 1}`;
-      sanitizedPlayers[profile.id] = {
-        ...profile,
-        name: profile.name.trim() || fallbackName,
-      };
-    });
-    onSelectPlayer(playerId, sanitizedPlayers, cleanRealm);
+    setAvatarIdx((prev) => (prev + delta + AVATARS.length) % AVATARS.length);
   };
 
   const handleCycleSplash = () => {
     playSound('click');
     setSplashIndex((prev) => (prev + 1) % SPLASH_TEXTS.length);
   };
+
+  const handlePinChange = (raw: string) => {
+    const digitsOnly = raw.replace(/\D/g, '').slice(0, 3);
+    setPin(digitsOnly);
+    if (error) setError('');
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitting) return;
+
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      playSound('click');
+      setError('Please enter your Crafter Name!');
+      return;
+    }
+
+    if (!/^\d{3}$/.test(pin)) {
+      playSound('click');
+      setError('Please enter a 3-digit PIN (numbers 0–9).');
+      return;
+    }
+
+    playSound('click');
+    setError('');
+    setSubmitting(true);
+
+    try {
+      const cleanRealm = localRealm.trim().toUpperCase() || 'FAMILY-CRAFT';
+      const result = await onLogin({
+        name: trimmedName,
+        pin,
+        avatarId: currentAvatar ? currentAvatar.id : 'knight',
+        realmCode: cleanRealm,
+      });
+
+      if (!result.ok) {
+        setError(result.error || 'Login failed. Please check your 3-digit PIN.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Login failed. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const syncDotColor =
+    syncStatus.state === 'synced'
+      ? '#55ff55'
+      : syncStatus.state === 'syncing'
+        ? '#ffdd55'
+        : syncStatus.state === 'error'
+          ? '#ff5555'
+          : '#aaaaaa';
 
   return (
     <div className="cf-profile-gate">
@@ -163,28 +130,20 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
           flex-direction: column;
           align-items: center;
           justify-content: center;
-          padding: 20px 24px 28px;
+          padding: 20px 20px 32px;
           box-sizing: border-box;
           position: relative;
         }
-        .cf-profile-cards {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 20px;
+        .cf-login-card {
           width: 100%;
-          max-width: 1140px;
-          margin-bottom: 18px;
+          max-width: 540px;
+          box-sizing: border-box;
+          margin-bottom: 16px;
         }
-        @media (min-width: 960px) {
-          .cf-profile-cards {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-          }
-        }
-        @media (max-width: 660px) {
-          .cf-profile-cards {
-            grid-template-columns: 1fr;
-            gap: 16px;
-          }
+        .cf-realm-bar {
+          width: 100%;
+          max-width: 540px;
+          box-sizing: border-box;
         }
       `}</style>
 
@@ -193,15 +152,15 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
         style={{
           position: 'relative',
           textAlign: 'center',
-          marginBottom: '22px',
-          maxWidth: '1140px',
+          marginBottom: '20px',
+          maxWidth: '680px',
           width: '100%',
         }}
       >
         <h1
           style={{
             fontFamily: "'Press Start 2P', monospace",
-            fontSize: 'clamp(1.85rem, 5.2vw, 3.5rem)',
+            fontSize: 'clamp(1.85rem, 5.2vw, 3.4rem)',
             letterSpacing: '0.06em',
             color: '#e8e8e8',
             margin: 0,
@@ -236,342 +195,404 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
         >
           {SPLASH_TEXTS[splashIndex]}
         </button>
-
-        <p
-          style={{
-            fontFamily: "'VT323', monospace",
-            fontSize: '1.45rem',
-            color: '#f2f2f2',
-            textShadow: '2px 2px 0 rgba(0,0,0,0.85)',
-            margin: '8px 0 0',
-          }}
-        >
-          Design custom Minecraft items, send them over, and rate them 0 to 10!
-        </p>
       </div>
 
-      {/* Dynamic Player Cards + Add Player Card */}
-      <div className="cf-profile-cards">
-        {playerList.map((profile, idx) => {
-          const pid = profile.id;
-          const avatarIdx = getAvatarIndex(profile.avatarId);
-          const avatar = AVATARS[avatarIdx];
-          const fallbackName = idx === 0 ? 'Dad' : idx === 1 ? 'Son' : `Player ${idx + 1}`;
-          const displayName = profile.name.trim() || fallbackName;
-          const badgeColor =
-            profile.color || PLAYER_ACCENT_COLORS[idx % PLAYER_ACCENT_COLORS.length];
-          const playBtnClass = PLAY_BTN_CLASSES[idx % PLAY_BTN_CLASSES.length];
-          const canRemove = playerList.length > 2 && pid !== 'player1' && pid !== 'player2';
-
-          return (
-            <div
-              key={pid}
-              className="mc-panel"
-              style={{
-                padding: '20px 22px',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: '14px',
-              }}
-            >
-              {/* Player slot badge + optional remove button */}
-              <div
-                style={{
-                  width: '100%',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: '8px',
-                }}
-              >
-                <span
-                  className="mc-badge"
-                  style={{
-                    backgroundColor: badgeColor,
-                    color: '#ffffff',
-                    fontFamily: "'Silkscreen', monospace",
-                    fontSize: '0.76rem',
-                    padding: '5px 10px',
-                  }}
-                >
-                  PLAYER {idx + 1}
-                </span>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span
-                    style={{
-                      fontFamily: "'VT323', monospace",
-                      fontSize: '1.22rem',
-                      color: '#3f3f3f',
-                    }}
-                  >
-                    {avatar ? avatar.name : 'Crafter'}
-                  </span>
-                  {canRemove && (
-                    <button
-                      type="button"
-                      className="mc-btn mc-btn-red"
-                      onClick={() => handleRemovePlayer(pid)}
-                      aria-label={`Remove ${displayName}`}
-                      title={`Remove ${displayName}`}
-                      style={{
-                        minWidth: '34px',
-                        minHeight: '34px',
-                        padding: '2px 8px',
-                        fontSize: '0.75rem',
-                        fontFamily: "'Press Start 2P', monospace",
-                      }}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Avatar picker with Prev / Next */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '12px',
-                }}
-              >
-                <button
-                  type="button"
-                  className="mc-btn"
-                  aria-label={`Previous avatar for Player ${idx + 1}`}
-                  onClick={() => handleCycleAvatar(pid, -1)}
-                  style={{
-                    minWidth: '46px',
-                    minHeight: '46px',
-                    padding: '6px 10px',
-                    fontSize: '1.1rem',
-                  }}
-                >
-                  ◀
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleCycleAvatar(pid, 1)}
-                  title="Tap to change avatar"
-                  className="mc-slot"
-                  style={{
-                    width: '96px',
-                    height: '96px',
-                    padding: '8px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {avatar ? (
-                    <img
-                      src={avatar.dataUrl}
-                      alt={avatar.name}
-                      className="mc-pixelated"
-                      style={{
-                        width: '78px',
-                        height: '78px',
-                        imageRendering: 'pixelated',
-                        display: 'block',
-                      }}
-                    />
-                  ) : (
-                    <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: '1.5rem' }}>
-                      ?
-                    </span>
-                  )}
-                </button>
-
-                <button
-                  type="button"
-                  className="mc-btn"
-                  aria-label={`Next avatar for Player ${idx + 1}`}
-                  onClick={() => handleCycleAvatar(pid, 1)}
-                  style={{
-                    minWidth: '46px',
-                    minHeight: '46px',
-                    padding: '6px 10px',
-                    fontSize: '1.1rem',
-                  }}
-                >
-                  ▶
-                </button>
-              </div>
-
-              {/* Inline Name Edit */}
-              <div style={{ width: '100%' }}>
-                <label
-                  htmlFor={`player-name-${pid}`}
-                  style={{
-                    display: 'block',
-                    fontFamily: "'Silkscreen', monospace",
-                    fontSize: '0.74rem',
-                    color: '#373737',
-                    marginBottom: '6px',
-                    textTransform: 'uppercase',
-                  }}
-                >
-                  Crafter Name
-                </label>
-                <input
-                  id={`player-name-${pid}`}
-                  type="text"
-                  className="mc-input"
-                  value={profile.name}
-                  maxLength={18}
-                  placeholder={fallbackName}
-                  onChange={(e) => handleNameChange(pid, e.target.value)}
-                  style={{
-                    width: '100%',
-                    boxSizing: 'border-box',
-                    fontSize: '1.12rem',
-                    padding: '10px 12px',
-                    textAlign: 'center',
-                  }}
-                />
-              </div>
-
-              {/* Play Button */}
-              <button
-                type="button"
-                className={`mc-btn ${playBtnClass}`}
-                onClick={() => handlePlay(pid)}
-                style={{
-                  width: '100%',
-                  minHeight: '54px',
-                  fontSize: '0.88rem',
-                  fontFamily: "'Press Start 2P', monospace",
-                  letterSpacing: '0.03em',
-                  marginTop: '4px',
-                }}
-              >
-                PLAY AS {displayName.toUpperCase()}
-              </button>
-            </div>
-          );
-        })}
-
-        {/* Chunky + ADD PLAYER Card */}
-        <button
-          type="button"
-          onClick={handleAddPlayer}
-          className="mc-panel-dark"
+      {/* Single Sleek Minecraft LOGIN Panel */}
+      <form
+        onSubmit={handleSubmit}
+        className="mc-panel cf-login-card"
+        style={{
+          padding: '24px 26px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '16px',
+        }}
+      >
+        <h2
           style={{
-            padding: '24px 20px',
-            cursor: 'pointer',
+            margin: 0,
+            fontFamily: "'Press Start 2P', monospace",
+            fontSize: 'clamp(0.95rem, 2.5vw, 1.15rem)',
+            color: '#2b2b2b',
+            letterSpacing: '0.05em',
+          }}
+        >
+          CRAFTER LOGIN
+        </h2>
+
+        {/* Avatar Portrait Cycler (No class name label!) */}
+        <div
+          style={{
             display: 'flex',
-            flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
             gap: '14px',
-            minHeight: '260px',
-            border: '3px dashed #7a7a7a',
-            textAlign: 'center',
-            transition: 'transform 0.1s ease, border-color 0.12s ease',
           }}
         >
-          <div
+          <button
+            type="button"
+            className="mc-btn"
+            aria-label="Previous avatar"
+            onClick={() => handleCycleAvatar(-1)}
+            style={{
+              minWidth: '48px',
+              minHeight: '48px',
+              padding: '6px 12px',
+              fontSize: '1.15rem',
+            }}
+          >
+            ◀
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleCycleAvatar(1)}
+            aria-label="Cycle avatar"
+            title="Tap to change avatar"
             className="mc-slot"
             style={{
-              width: '76px',
-              height: '76px',
+              width: '104px',
+              height: '104px',
+              padding: '8px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              fontFamily: "'Press Start 2P', monospace",
-              fontSize: '2.2rem',
-              color: '#55ff55',
-              textShadow: '2px 2px 0 #000',
+              cursor: 'pointer',
             }}
           >
-            +
-          </div>
-          <div
-            style={{
-              fontFamily: "'Press Start 2P', monospace",
-              fontSize: '0.9rem',
-              color: '#ffffff',
-              textShadow: '2px 2px 0 #000',
-              lineHeight: 1.4,
-            }}
-          >
-            + ADD PLAYER
-          </div>
-          <div
-            style={{
-              fontFamily: "'VT323', monospace",
-              fontSize: '1.25rem',
-              color: '#cccccc',
-              maxWidth: '220px',
-              lineHeight: 1.25,
-            }}
-          >
-            Invite another sibling, parent, or friend to this Realm!
-          </div>
-        </button>
-      </div>
+            {currentAvatar ? (
+              <img
+                src={currentAvatar.dataUrl}
+                alt="Player Avatar"
+                className="mc-pixelated"
+                style={{
+                  width: '84px',
+                  height: '84px',
+                  imageRendering: 'pixelated',
+                  display: 'block',
+                }}
+              />
+            ) : (
+              <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: '1.5rem' }}>
+                ?
+              </span>
+            )}
+          </button>
 
-      {/* Realm Code Panel */}
-      <div
-        className="mc-panel-dark"
-        style={{
-          width: '100%',
-          maxWidth: '1140px',
-          padding: '14px 22px',
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '14px',
-          boxSizing: 'border-box',
-        }}
-      >
-        <div style={{ flex: '1 1 280px' }}>
-          <div
+          <button
+            type="button"
+            className="mc-btn"
+            aria-label="Next avatar"
+            onClick={() => handleCycleAvatar(1)}
             style={{
+              minWidth: '48px',
+              minHeight: '48px',
+              padding: '6px 12px',
+              fontSize: '1.15rem',
+            }}
+          >
+            ▶
+          </button>
+        </div>
+
+        {/* Crafter Name Input */}
+        <div style={{ width: '100%' }}>
+          <label
+            htmlFor="login-crafter-name"
+            style={{
+              display: 'block',
               fontFamily: "'Silkscreen', monospace",
-              fontSize: '0.88rem',
-              color: '#55ff55',
-              marginBottom: '4px',
+              fontSize: '0.78rem',
+              color: '#373737',
+              marginBottom: '6px',
+              textTransform: 'uppercase',
             }}
           >
-            REALM CODE
-          </div>
-          <div
+            Crafter Name
+          </label>
+          <input
+            id="login-crafter-name"
+            type="text"
+            className="mc-input"
+            value={name}
+            maxLength={18}
+            autoComplete="username"
+            placeholder="Enter your name"
+            onChange={(e) => {
+              setName(e.target.value);
+              if (error) setError('');
+            }}
             style={{
-              fontFamily: "'VT323', monospace",
-              fontSize: '1.25rem',
-              color: '#d0d0d0',
-              lineHeight: 1.2,
+              width: '100%',
+              boxSizing: 'border-box',
+              fontSize: '1.2rem',
+              padding: '12px 14px',
+              textAlign: 'center',
+            }}
+          />
+        </div>
+
+        {/* 3-Digit PIN Input with Show/Hide Toggle */}
+        <div style={{ width: '100%' }}>
+          <label
+            htmlFor="login-crafter-pin"
+            style={{
+              display: 'block',
+              fontFamily: "'Silkscreen', monospace",
+              fontSize: '0.78rem',
+              color: '#373737',
+              marginBottom: '6px',
+              textTransform: 'uppercase',
             }}
           >
-            Enter the same code on all tablets to share your chest & inbox!
+            3-Digit PIN
+          </label>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'stretch' }}>
+            <input
+              id="login-crafter-pin"
+              type={showPin ? 'text' : 'password'}
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={3}
+              autoComplete="current-password"
+              className="mc-input"
+              value={pin}
+              placeholder="•••"
+              onChange={(e) => handlePinChange(e.target.value)}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                boxSizing: 'border-box',
+                fontFamily: "'Press Start 2P', monospace",
+                fontSize: '1.25rem',
+                letterSpacing: '0.45em',
+                padding: '12px 14px',
+                textAlign: 'center',
+              }}
+            />
+            <button
+              type="button"
+              className="mc-btn"
+              aria-label={showPin ? 'Hide PIN' : 'Show PIN'}
+              title={showPin ? 'Hide PIN' : 'Show PIN'}
+              onClick={() => {
+                playSound('click');
+                setShowPin((prev) => !prev);
+              }}
+              style={{
+                minWidth: '52px',
+                minHeight: '48px',
+                padding: '6px 12px',
+                fontSize: '1.15rem',
+              }}
+            >
+              {showPin ? '🙈' : '👁'}
+            </button>
           </div>
         </div>
 
-        <input
-          type="text"
-          className="mc-input"
-          aria-label="Realm Code"
-          value={localRealm}
-          maxLength={24}
-          placeholder="FAMILY-CRAFT"
-          onChange={(e) => setLocalRealm(e.target.value.toUpperCase())}
+        {/* Helper Note */}
+        <p
           style={{
-            flex: '0 1 260px',
-            width: '100%',
-            boxSizing: 'border-box',
-            fontFamily: "'Press Start 2P', monospace",
-            fontSize: '0.88rem',
-            padding: '12px 14px',
+            margin: 0,
+            fontFamily: "'VT323', monospace",
+            fontSize: '1.22rem',
+            color: '#444444',
             textAlign: 'center',
-            letterSpacing: '0.08em',
+            lineHeight: 1.25,
           }}
-        />
+        >
+          First time using a name? Your 3-digit PIN locks it. Returning? Enter your PIN to log in.
+        </p>
+
+        {/* Error Alert Box */}
+        {error && (
+          <div
+            role="alert"
+            style={{
+              width: '100%',
+              boxSizing: 'border-box',
+              backgroundColor: '#5c1414',
+              border: '3px solid #ff5555',
+              color: '#ffdddd',
+              padding: '10px 14px',
+              fontFamily: "'Silkscreen', monospace",
+              fontSize: '0.78rem',
+              textAlign: 'center',
+              lineHeight: 1.4,
+            }}
+          >
+            ⚠ {error}
+          </div>
+        )}
+
+        {/* Big Chunky Green PLAY / LOGIN Button */}
+        <button
+          type="submit"
+          className="mc-btn mc-btn-green"
+          disabled={submitting}
+          style={{
+            width: '100%',
+            minHeight: '58px',
+            fontFamily: "'Press Start 2P', monospace",
+            fontSize: '0.98rem',
+            letterSpacing: '0.04em',
+            opacity: submitting ? 0.65 : 1,
+            cursor: submitting ? 'wait' : 'pointer',
+          }}
+        >
+          {submitting ? 'CHECKING PIN...' : 'PLAY / LOGIN'}
+        </button>
+      </form>
+
+      {/* Bottom Realm Code + Cloud Sync Bar */}
+      <div
+        className="mc-panel-dark cf-realm-bar"
+        style={{
+          padding: '14px 18px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '10px',
+          }}
+        >
+          <div style={{ flex: '1 1 160px' }}>
+            <div
+              style={{
+                fontFamily: "'Silkscreen', monospace",
+                fontSize: '0.82rem',
+                color: '#55ff55',
+                marginBottom: '2px',
+              }}
+            >
+              REALM CODE
+            </div>
+            <div
+              style={{
+                fontFamily: "'VT323', monospace",
+                fontSize: '1.15rem',
+                color: '#cccccc',
+              }}
+            >
+              Same code = shared chest & inbox
+            </div>
+          </div>
+
+          <input
+            type="text"
+            className="mc-input"
+            aria-label="Realm Code"
+            value={localRealm}
+            maxLength={24}
+            placeholder="FAMILY-CRAFT"
+            onChange={(e) => setLocalRealm(e.target.value.toUpperCase())}
+            style={{
+              flex: '1 1 180px',
+              maxWidth: '240px',
+              width: '100%',
+              boxSizing: 'border-box',
+              fontFamily: "'Press Start 2P', monospace",
+              fontSize: '0.8rem',
+              padding: '10px 12px',
+              textAlign: 'center',
+              letterSpacing: '0.06em',
+            }}
+          />
+        </div>
+
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '10px',
+            paddingTop: '10px',
+            borderTop: '2px solid rgba(255,255,255,0.12)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span
+              style={{
+                width: '10px',
+                height: '10px',
+                backgroundColor: syncDotColor,
+                display: 'inline-block',
+                border: '1px solid #000',
+              }}
+            />
+            <span
+              style={{
+                fontFamily: "'VT323', monospace",
+                fontSize: '1.2rem',
+                color: '#dcdcdc',
+              }}
+            >
+              {syncStatus.message}
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            {onOpenRealmInvite && (
+              <>
+                <button
+                  type="button"
+                  className="mc-btn mc-btn-green"
+                  onClick={() => {
+                    playSound('click');
+                    onOpenRealmInvite('create');
+                  }}
+                  style={{
+                    minHeight: '44px',
+                    padding: '8px 12px',
+                    fontSize: '0.76rem',
+                  }}
+                >
+                  🏰 Create Realm
+                </button>
+                <button
+                  type="button"
+                  className="mc-btn mc-btn-gold"
+                  onClick={() => {
+                    playSound('click');
+                    onOpenRealmInvite('invite');
+                  }}
+                  style={{
+                    minHeight: '44px',
+                    padding: '8px 12px',
+                    fontSize: '0.76rem',
+                  }}
+                >
+                  ✉ Email Invite
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className="mc-btn"
+              onClick={() => {
+                playSound('click');
+                onOpenSyncModal();
+              }}
+              style={{
+                minHeight: '44px',
+                padding: '8px 14px',
+                fontSize: '0.76rem',
+              }}
+            >
+              ☁ Cloud Sync
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

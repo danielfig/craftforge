@@ -164,13 +164,50 @@ export function normalizeStarterDemoItems(items: CraftItem[], realmCode: string)
   return [...userItems, ...demoItems].sort((a, b) => b.createdAt - a.createdAt);
 }
 
+export const PLAYER_ACCENT_COLORS = [
+  '#4aedf9',
+  '#55ff55',
+  '#ffaa00',
+  '#ff66cc',
+  '#aa88ff',
+  '#55ffff',
+  '#ff7755',
+  '#ffee55',
+];
+
+/**
+ * Deterministic synchronous hash for first-come 3-digit PIN lock.
+ * Uses normalized lowercase name + PIN so the same PIN produces different hashes per player.
+ */
+export function hashPin(name: string, pin: string): string {
+  const input = `${name.trim().toLowerCase()}:${pin.trim()}`;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= c + i * 31;
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  const part1 = (h1 >>> 0).toString(16).padStart(8, '0');
+  const part2 = (h2 >>> 0).toString(16).padStart(8, '0');
+  return `pinv1:${part1}${part2}`;
+}
+
+export function findPlayerByName(
+  players: Record<PlayerId, PlayerProfile>,
+  name: string
+): PlayerProfile | undefined {
+  const target = name.trim().toLowerCase();
+  if (!target) return undefined;
+  return Object.values(players).find((p) => p.name.trim().toLowerCase() === target);
+}
+
 export function createStarterRealm(realmCode = 'FAMILY-CRAFT'): RealmState {
   return {
     realmCode,
-    players: {
-      player1: { ...DEFAULT_PLAYERS.player1 },
-      player2: { ...DEFAULT_PLAYERS.player2 },
-    },
+    players: {},
     items: createStarterDemoItems(realmCode),
   };
 }
@@ -185,8 +222,6 @@ export function sanitizeRealmCode(raw: string): string {
   return cleaned || 'FAMILY-CRAFT';
 }
 
-const EXTRA_PLAYER_COLORS = ['#ffaa00', '#ff66cc', '#aa88ff', '#55ffff', '#ff7755', '#ffee55'];
-
 function normalizePlayersMap(
   rawPlayers: Record<string, Partial<PlayerProfile>> | undefined
 ): Record<PlayerId, PlayerProfile> {
@@ -197,32 +232,23 @@ function normalizePlayersMap(
     for (const [key, profile] of Object.entries(rawPlayers)) {
       const id = (profile?.id || key || '').trim();
       if (!id || id === 'neon') continue;
-      const fallback = DEFAULT_PLAYERS[id];
+      const name = (profile?.name || '').trim();
+      if (!name) continue;
+      const pinHash =
+        typeof profile?.pinHash === 'string' && profile.pinHash.trim()
+          ? profile.pinHash.trim()
+          : undefined;
       result[id] = {
         id,
-        name: (profile?.name || fallback?.name || `Player ${idx + 1}`).trim() || `Player ${idx + 1}`,
-        avatarId: profile?.avatarId || fallback?.avatarId || 'knight',
+        name,
+        avatarId: profile?.avatarId || 'knight',
         color:
           profile?.color ||
-          fallback?.color ||
-          EXTRA_PLAYER_COLORS[idx % EXTRA_PLAYER_COLORS.length],
+          PLAYER_ACCENT_COLORS[idx % PLAYER_ACCENT_COLORS.length],
+        ...(pinHash ? { pinHash } : {}),
       };
       idx++;
     }
-  }
-
-  // Always guarantee at least the 2 default players exist for backward compatibility
-  if (Object.keys(result).length === 0) {
-    return {
-      player1: { ...DEFAULT_PLAYERS.player1 },
-      player2: { ...DEFAULT_PLAYERS.player2 },
-    };
-  }
-  if (!result.player1 && Object.keys(result).length < 2) {
-    result.player1 = { ...DEFAULT_PLAYERS.player1 };
-  }
-  if (!result.player2 && Object.keys(result).length < 2) {
-    result.player2 = { ...DEFAULT_PLAYERS.player2 };
   }
 
   return result;
@@ -386,10 +412,16 @@ export function mergeRealmStates(local: RealmState, remote: RealmState): RealmSt
   if (remote.players && typeof remote.players === 'object') {
     for (const [id, rProfile] of Object.entries(remote.players)) {
       if (!id || id === 'neon' || !rProfile?.name) continue;
+      const localProfile = mergedPlayers[id];
+      const preservedPinHash =
+        (rProfile.pinHash && rProfile.pinHash.trim()) ||
+        (localProfile?.pinHash && localProfile.pinHash.trim()) ||
+        undefined;
       mergedPlayers[id] = {
-        ...(mergedPlayers[id] || {}),
+        ...(localProfile || {}),
         ...rProfile,
         id,
+        ...(preservedPinHash ? { pinHash: preservedPinHash } : {}),
       };
     }
   }

@@ -840,7 +840,7 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                           <span>
                             Crafted by{' '}
                             <strong style={{ color: '#55ff55' }}>
-                              {inspectCreator?.name}
+                              {inspectCreator?.name || 'Crafter'}
                             </strong>
                           </span>
                         </>

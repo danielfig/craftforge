@@ -3,8 +3,12 @@ import './styles/minecraft.css';
 import { CraftItem, PlayerId, PlayerProfile, RealmState } from './types';
 import {
   CloudSyncConfig,
+  PLAYER_ACCENT_COLORS,
   SyncStatus,
+  createStarterRealm,
+  findPlayerByName,
   generateItemId,
+  hashPin,
   isDemoItem,
   loadActivePlayer,
   loadCloudConfig,
@@ -22,6 +26,17 @@ import { ProfileGate } from './components/ProfileGate';
 import { ItemStudio } from './components/ItemStudio';
 import { InboxGrader } from './components/InboxGrader';
 import { SharedChest } from './components/SharedChest';
+import {
+  CreateRealmOptions,
+  RealmInviteModal,
+  RealmModalTab,
+} from './components/RealmInviteModal';
+import { JoinRealmModal } from './components/JoinRealmModal';
+import {
+  RealmInvitePayload,
+  clearInviteFromUrl,
+  parseInviteFromLocation,
+} from './utils/realmInvite';
 import { AVATARS } from './assets/textures';
 import { isMuted, playSound, setMuted } from './utils/sounds';
 
@@ -41,7 +56,12 @@ export default function App() {
 
   // Cloud Sync Modal state
   const [showSyncModal, setShowSyncModal] = useState(false);
-  const [showPlayerMenu, setShowPlayerMenu] = useState(false);
+  const [showRealmModal, setShowRealmModal] = useState(false);
+  const [realmModalTab, setRealmModalTab] = useState<RealmModalTab>('create');
+  const [pendingInvite, setPendingInvite] = useState<RealmInvitePayload | null>(() =>
+    parseInviteFromLocation()
+  );
+  const [toastMessage, setToastMessage] = useState<string>('');
   const [snippetInput, setSnippetInput] = useState('');
   const [projectIdInput, setProjectIdInput] = useState(cloudConfig.projectId);
   const [apiKeyInput, setApiKeyInput] = useState(cloudConfig.apiKey);
@@ -51,19 +71,30 @@ export default function App() {
   // Keep latest realm in a ref for async cloud sync merges
   const realmRef = useRef(realm);
   realmRef.current = realm;
-  const switcherRef = useRef<HTMLDivElement | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
-  // Close player switcher popover on outside click
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage('');
+      toastTimerRef.current = null;
+    }, 4500);
+  }, []);
+
+  // Listen for #join=... invite links pasted/opened while app is running
   useEffect(() => {
-    if (!showPlayerMenu) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (switcherRef.current && !switcherRef.current.contains(e.target as Node)) {
-        setShowPlayerMenu(false);
+    const onHashChange = () => {
+      const invite = parseInviteFromLocation();
+      if (invite) {
+        setPendingInvite(invite);
       }
     };
-    window.addEventListener('pointerdown', onPointerDown);
-    return () => window.removeEventListener('pointerdown', onPointerDown);
-  }, [showPlayerMenu]);
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   // Persist realm to localStorage on every change
   useEffect(() => {
@@ -127,41 +158,127 @@ export default function App() {
     [realm.players, activePlayerId]
   );
 
-  const unratedByPlayer = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const item of realm.items) {
-      if (!item.hidden && !isDemoItem(item) && item.grade === null) {
-        counts[item.recipientId] = (counts[item.recipientId] || 0) + 1;
-      }
-    }
-    return counts;
-  }, [realm.items]);
-
-  const unratedCount = activePlayerId ? unratedByPlayer[activePlayerId] || 0 : 0;
+  const unratedCount = useMemo(() => {
+    if (!activePlayerId) return 0;
+    return realm.items.filter(
+      (item) =>
+        !item.hidden &&
+        !isDemoItem(item) &&
+        item.recipientId === activePlayerId &&
+        item.grade === null
+    ).length;
+  }, [realm.items, activePlayerId]);
 
   const visibleItemCount = useMemo(
     () => realm.items.filter((item) => !item.hidden && !isDemoItem(item)).length,
     [realm.items]
   );
 
-  const handleSelectPlayer = (
-    playerId: PlayerId,
-    updatedPlayers: Record<PlayerId, PlayerProfile>,
-    newRealmCode: string
-  ) => {
-    const cleanCode = sanitizeRealmCode(newRealmCode);
-    const nextRealm: RealmState = {
-      ...realm,
+  const handleLogin = async (params: {
+    name: string;
+    pin: string;
+    avatarId: string;
+    realmCode: string;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    const cleanName = params.name.trim();
+    const cleanPin = params.pin.trim();
+    if (!cleanName) {
+      return { ok: false, error: 'Please enter a Crafter Name!' };
+    }
+    if (!/^\d{3}$/.test(cleanPin)) {
+      return { ok: false, error: 'PIN must be exactly 3 digits (000–999)!' };
+    }
+
+    const cleanCode = sanitizeRealmCode(params.realmCode);
+    let workingRealm: RealmState = {
+      ...realmRef.current,
       realmCode: cleanCode,
-      players: updatedPlayers,
     };
+
+    // Pull latest realm from Firestore before checking/claiming name so PINs sync across devices
+    if (cloudConfig.enabled && cloudConfig.projectId) {
+      setSyncStatus((prev) => ({ ...prev, state: 'syncing', message: 'Checking Realm...' }));
+      try {
+        const remote = await pullRealmFromCloud(cloudConfig, cleanCode);
+        if (remote) {
+          workingRealm = mergeRealmStates(workingRealm, remote);
+        }
+        setSyncStatus({
+          state: 'synced',
+          message: `Synced (${cleanCode})`,
+          lastSyncedAt: Date.now(),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Sync failed';
+        setSyncStatus({ state: 'error', message: msg, lastSyncedAt: null });
+      }
+    }
+
+    const existing = findPlayerByName(workingRealm.players, cleanName);
+    let loggedInId: PlayerId;
+    let nextRealm: RealmState = workingRealm;
+
+    if (existing) {
+      const expectedHash = hashPin(existing.name, cleanPin);
+      if (existing.pinHash) {
+        if (existing.pinHash !== expectedHash) {
+          return { ok: false, error: `Wrong 3-digit PIN for ${existing.name}!` };
+        }
+        loggedInId = existing.id;
+      } else {
+        // Legacy player without pinHash: lock with first entered 3-digit PIN
+        const lockedPlayer: PlayerProfile = {
+          ...existing,
+          pinHash: expectedHash,
+        };
+        nextRealm = {
+          ...workingRealm,
+          players: {
+            ...workingRealm.players,
+            [existing.id]: lockedPlayer,
+          },
+        };
+        loggedInId = existing.id;
+      }
+    } else {
+      const playerIndex = Object.keys(workingRealm.players).length;
+      const newId: PlayerId = `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const newPlayer: PlayerProfile = {
+        id: newId,
+        name: cleanName,
+        avatarId: params.avatarId || AVATARS[0]?.id || 'knight',
+        color: PLAYER_ACCENT_COLORS[playerIndex % PLAYER_ACCENT_COLORS.length],
+        pinHash: hashPin(cleanName, cleanPin),
+      };
+      nextRealm = {
+        ...workingRealm,
+        players: {
+          ...workingRealm.players,
+          [newId]: newPlayer,
+        },
+      };
+      loggedInId = newId;
+    }
+
     setRealm(nextRealm);
     setRealmCodeInput(cleanCode);
-    setActivePlayerId(playerId);
-    setShowPlayerMenu(false);
+    setActivePlayerId(loggedInId);
+
     if (cloudConfig.enabled && cloudConfig.projectId) {
-      void syncNow(cloudConfig, nextRealm);
+      try {
+        await pushRealmToCloud(cloudConfig, nextRealm);
+        setSyncStatus({
+          state: 'synced',
+          message: `Synced (${cleanCode})`,
+          lastSyncedAt: Date.now(),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Sync failed';
+        setSyncStatus({ state: 'error', message: msg, lastSyncedAt: null });
+      }
     }
+
+    return { ok: true };
   };
 
   const handleSendItem = (
@@ -256,15 +373,8 @@ export default function App() {
     }
   };
 
-  const handleSwitchToPlayer = (targetId: PlayerId) => {
-    playSound('click');
-    setActivePlayerId(targetId);
-    setShowPlayerMenu(false);
-  };
-
   const handleBackToTitle = () => {
     playSound('click');
-    setShowPlayerMenu(false);
     setActivePlayerId(null);
   };
 
@@ -323,16 +433,380 @@ export default function App() {
     void syncNow(nextCfg, updatedRealm);
   };
 
+  const handleOpenRealmModal = (tab: RealmModalTab) => {
+    playSound('click');
+    setRealmModalTab(tab);
+    setShowRealmModal(true);
+  };
+
+  const handleCreateRealm = (options: CreateRealmOptions) => {
+    const cleanCode = sanitizeRealmCode(options.realmCode);
+    const nextPlayers: Record<PlayerId, PlayerProfile> = options.keepPlayers
+      ? realm.players
+      : {};
+    const nextItems: CraftItem[] = options.freshChest
+      ? createStarterRealm(cleanCode).items
+      : realm.items.map((item) => ({ ...item, realmCode: cleanCode }));
+
+    const nextRealm: RealmState = {
+      realmCode: cleanCode,
+      players: nextPlayers,
+      items: nextItems,
+    };
+
+    setRealm(nextRealm);
+    setRealmCodeInput(cleanCode);
+
+    if (activePlayerId && !nextPlayers[activePlayerId]) {
+      setActivePlayerId(null);
+    }
+
+    let activeCfg = cloudConfig;
+    if (options.cloudConfig && options.cloudConfig.enabled && options.cloudConfig.projectId) {
+      activeCfg = options.cloudConfig;
+      setCloudConfig(activeCfg);
+      saveCloudConfig(activeCfg);
+    }
+
+    if (activeCfg.enabled && activeCfg.projectId) {
+      void pushRealmToCloud(activeCfg, nextRealm)
+        .then(() => {
+          setSyncStatus({
+            state: 'synced',
+            message: `Synced (${cleanCode})`,
+            lastSyncedAt: Date.now(),
+          });
+        })
+        .catch(() => {
+          void syncNow(activeCfg, nextRealm);
+        });
+    }
+
+    showToast(`🏰 Created Realm "${cleanCode}"!`);
+  };
+
+  const handleAcceptInvite = (invite: RealmInvitePayload) => {
+    clearInviteFromUrl();
+    setPendingInvite(null);
+
+    const cleanCode = sanitizeRealmCode(invite.realmCode);
+    const nextRealm: RealmState =
+      cleanCode !== realm.realmCode ? createStarterRealm(cleanCode) : realm;
+
+    setRealm(nextRealm);
+    setRealmCodeInput(cleanCode);
+    setActivePlayerId(null);
+
+    let activeCfg = cloudConfig;
+    if (invite.projectId) {
+      activeCfg = {
+        enabled: true,
+        projectId: invite.projectId,
+        apiKey: invite.apiKey || '',
+      };
+      setCloudConfig(activeCfg);
+      saveCloudConfig(activeCfg);
+    }
+
+    if (activeCfg.enabled && activeCfg.projectId) {
+      void syncNow(activeCfg, nextRealm);
+    }
+
+    showToast(`⚔ Joined Realm "${cleanCode}"! Log in with your Crafter Name & 3-digit PIN.`);
+  };
+
+  const handleDismissInvite = () => {
+    clearInviteFromUrl();
+    setPendingInvite(null);
+  };
+
   const getAvatarUrl = (avatarId: string) =>
     AVATARS.find((a) => a.id === avatarId)?.dataUrl || AVATARS[0]?.dataUrl || '';
 
+  const globalOverlays = (
+    <>
+      <style>{`
+        .cf-modal-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 1000;
+          background: rgba(0, 0, 0, 0.72);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 16px;
+        }
+        .cf-modal {
+          width: 100%;
+          max-width: 620px;
+          max-height: 90dvh;
+          overflow-y: auto;
+          padding: 18px;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+        .cf-modal-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .cf-modal-title {
+          margin: 0;
+          font-size: 1.1rem;
+        }
+        .cf-modal-desc {
+          margin: 0;
+          font-size: 0.95rem;
+          line-height: 1.45;
+          color: #2b2b2b;
+        }
+        .cf-form-group {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          flex: 1;
+        }
+        .cf-form-group label {
+          font-size: 0.85rem;
+          font-weight: 700;
+          color: #222;
+        }
+        .cf-form-group .mc-input {
+          width: 100%;
+          box-sizing: border-box;
+          min-height: 44px;
+        }
+        .cf-form-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+        .cf-sync-status-bar {
+          padding: 8px 10px;
+          background: #222;
+          color: #e8e8e8;
+          border: 2px solid #000;
+          font-size: 0.9rem;
+        }
+        .cf-sync-status-bar {
+          padding: 8px 10px;
+          background: #222;
+          color: #e8e8e8;
+          border: 2px solid #000;
+          font-size: 0.9rem;
+        }
+        .cf-sync-error {
+          padding: 8px 10px;
+          background: #4a1212;
+          color: #ffb3b3;
+          border: 2px solid #ff5555;
+          font-size: 0.85rem;
+        }
+        .cf-modal-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          margin-top: 4px;
+        }
+        .cf-modal-actions .mc-btn {
+          min-height: 46px;
+          padding: 10px 14px;
+        }
+        .cf-toast {
+          position: fixed;
+          bottom: 18px;
+          left: 50%;
+          transform: translateX(-50%);
+          z-index: 1200;
+          padding: 12px 18px;
+          background: #1a2d15;
+          color: #d7ffca;
+          border: 3px solid #55ff55;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65);
+          font-family: 'Silkscreen', monospace;
+          font-size: 0.86rem;
+          text-align: center;
+          max-width: min(92vw, 560px);
+        }
+        @media (max-width: 720px) {
+          .cf-form-row {
+            grid-template-columns: 1fr;
+          }
+        }
+      `}</style>
+
+      {toastMessage && (
+        <div className="cf-toast" role="status" aria-live="polite">
+          {toastMessage}
+        </div>
+      )}
+
+      {showRealmModal && (
+        <RealmInviteModal
+          initialTab={realmModalTab}
+          currentRealmCode={realm.realmCode}
+          players={Object.values(realm.players)}
+          inviterName={currentPlayer?.name}
+          cloudConfig={cloudConfig}
+          onCreateRealm={handleCreateRealm}
+          onClose={() => setShowRealmModal(false)}
+        />
+      )}
+
+      {pendingInvite && (
+        <JoinRealmModal
+          invite={pendingInvite}
+          currentRealmCode={realm.realmCode}
+          onAccept={handleAcceptInvite}
+          onDismiss={handleDismissInvite}
+        />
+      )}
+
+      {showSyncModal && (
+        <div
+          className="cf-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Cloud Sync Settings"
+          onClick={() => setShowSyncModal(false)}
+        >
+          <div className="mc-panel cf-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="cf-modal-header">
+              <h2 className="cf-modal-title">☁ Realm & Cloud Sync</h2>
+              <button
+                type="button"
+                className="mc-btn mc-btn-red"
+                onClick={() => {
+                  playSound('click');
+                  setShowSyncModal(false);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="cf-modal-desc">
+              CraftForge works offline right away! To sync live across devices, paste a free
+              Firebase Firestore config (see README.md) and use the same{' '}
+              <strong>Realm Code</strong> on every device.
+            </p>
+
+            <div className="cf-form-group">
+              <label htmlFor="cf-realm-code">Realm Code (Shared Secret)</label>
+              <input
+                id="cf-realm-code"
+                type="text"
+                className="mc-input"
+                value={realmCodeInput}
+                onChange={(e) => setRealmCodeInput(e.target.value)}
+                placeholder="FAMILY-CRAFT"
+              />
+            </div>
+
+            <div className="cf-form-group">
+              <label htmlFor="cf-firebase-snippet">
+                Quick Paste Firebase Config Snippet (Optional)
+              </label>
+              <textarea
+                id="cf-firebase-snippet"
+                className="mc-input"
+                rows={3}
+                value={snippetInput}
+                onChange={(e) => handleSnippetPaste(e.target.value)}
+                placeholder={'Paste { apiKey: "...", projectId: "..." } here to auto-fill'}
+              />
+            </div>
+
+            <div className="cf-form-row">
+              <div className="cf-form-group">
+                <label htmlFor="cf-project-id">Firebase Project ID</label>
+                <input
+                  id="cf-project-id"
+                  type="text"
+                  className="mc-input"
+                  value={projectIdInput}
+                  onChange={(e) => setProjectIdInput(e.target.value)}
+                  placeholder="my-craftforge-123"
+                />
+              </div>
+
+              <div className="cf-form-group">
+                <label htmlFor="cf-api-key">Web API Key (optional)</label>
+                <input
+                  id="cf-api-key"
+                  type="text"
+                  className="mc-input"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="AIzaSy..."
+                />
+              </div>
+            </div>
+
+            <div className="cf-sync-status-bar">
+              Status: <strong>{syncStatus.message}</strong>
+            </div>
+
+            {syncError && <div className="cf-sync-error">{syncError}</div>}
+
+            <div className="cf-modal-actions">
+              <button
+                type="button"
+                className="mc-btn mc-btn-green"
+                onClick={() => handleSaveCloudSync(true)}
+              >
+                Save & Enable Cloud Sync
+              </button>
+              {cloudConfig.enabled && (
+                <button
+                  type="button"
+                  className="mc-btn mc-btn-gold"
+                  onClick={() => {
+                    playSound('click');
+                    void syncNow();
+                  }}
+                >
+                  ↻ Sync Now
+                </button>
+              )}
+              <button
+                type="button"
+                className="mc-btn"
+                onClick={() => handleSaveCloudSync(false)}
+              >
+                Use Local Only
+              </button>
+              <button
+                type="button"
+                className="mc-btn mc-btn-purple"
+                onClick={() => {
+                  setShowSyncModal(false);
+                  handleOpenRealmModal('invite');
+                }}
+              >
+                ✉ Email Join Invite
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+
   if (!activePlayerId || !currentPlayer) {
     return (
-      <ProfileGate
-        players={realm.players}
-        realmCode={realm.realmCode}
-        onSelectPlayer={handleSelectPlayer}
-      />
+      <>
+        <ProfileGate
+          realmCode={realm.realmCode}
+          syncStatus={syncStatus}
+          onOpenSyncModal={handleOpenSyncModal}
+          onOpenRealmInvite={handleOpenRealmModal}
+          onLogin={handleLogin}
+        />
+        {globalOverlays}
+      </>
     );
   }
 
@@ -544,6 +1018,20 @@ export default function App() {
           border: 2px solid #000;
           font-size: 0.9rem;
         }
+        .cf-sync-status-bar {
+          padding: 8px 10px;
+          background: #222;
+          color: #e8e8e8;
+          border: 2px solid #000;
+          font-size: 0.9rem;
+        }
+        .cf-sync-status-bar {
+          padding: 8px 10px;
+          background: #222;
+          color: #e8e8e8;
+          border: 2px solid #000;
+          font-size: 0.9rem;
+        }
         .cf-sync-error {
           padding: 8px 10px;
           background: #4a1212;
@@ -628,6 +1116,15 @@ export default function App() {
 
           <button
             type="button"
+            className="mc-btn mc-btn-green"
+            onClick={() => handleOpenRealmModal('invite')}
+            title="Create a Realm or Email Join Instructions"
+          >
+            ✉ Realm &amp; Invite
+          </button>
+
+          <button
+            type="button"
             className="mc-btn mc-btn-purple"
             onClick={handleOpenSyncModal}
             title="Cloud Sync Settings"
@@ -635,72 +1132,14 @@ export default function App() {
             ☁ Sync
           </button>
 
-          {otherPlayers.length === 1 ? (
-            <button
-              type="button"
-              className="mc-btn mc-btn-gold"
-              onClick={() => handleSwitchToPlayer(otherPlayers[0].id)}
-              title={`Quick switch to ${otherPlayers[0].name}`}
-            >
-              ⇄ {otherPlayers[0].name}
-            </button>
-          ) : otherPlayers.length > 1 ? (
-            <div className="cf-switcher-wrap" ref={switcherRef}>
-              <button
-                type="button"
-                className="mc-btn mc-btn-gold"
-                onClick={() => {
-                  playSound('click');
-                  setShowPlayerMenu((prev) => !prev);
-                }}
-                aria-expanded={showPlayerMenu}
-                aria-haspopup="menu"
-                title="Switch Player"
-              >
-                ⇄ Switch ({otherPlayers.length}) ▾
-              </button>
-
-              {showPlayerMenu && (
-                <div className="mc-panel-dark cf-switcher-menu" role="menu">
-                  {otherPlayers.map((p) => {
-                    const pUnrated = unratedByPlayer[p.id] || 0;
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        role="menuitem"
-                        className="mc-btn cf-switcher-item"
-                        onClick={() => handleSwitchToPlayer(p.id)}
-                      >
-                        <span className="cf-switcher-item-left">
-                          <img
-                            src={getAvatarUrl(p.avatarId)}
-                            alt={p.name}
-                            className="mc-pixelated cf-avatar-mini"
-                          />
-                          <span className="cf-player-name" style={{ color: p.color }}>
-                            {p.name}
-                          </span>
-                        </span>
-                        {pUnrated > 0 && (
-                          <span className="mc-badge cf-unrated-badge">{pUnrated}</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                  <div className="cf-switcher-divider" />
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="mc-btn mc-btn-purple cf-switcher-item"
-                    onClick={handleBackToTitle}
-                  >
-                    👥 Manage Players
-                  </button>
-                </div>
-              )}
-            </div>
-          ) : null}
+          <button
+            type="button"
+            className="mc-btn mc-btn-red"
+            onClick={handleBackToTitle}
+            title="Log Out to Login Screen"
+          >
+            🚪 Log Out
+          </button>
         </div>
       </header>
 
@@ -774,125 +1213,8 @@ export default function App() {
         )}
       </main>
 
-      {/* Cloud Sync Settings Modal */}
-      {showSyncModal && (
-        <div
-          className="cf-modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Cloud Sync Settings"
-          onClick={() => setShowSyncModal(false)}
-        >
-          <div className="mc-panel cf-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="cf-modal-header">
-              <h2 className="cf-modal-title">☁ Realm & Cloud Sync</h2>
-              <button
-                type="button"
-                className="mc-btn mc-btn-red"
-                onClick={() => {
-                  playSound('click');
-                  setShowSyncModal(false);
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <p className="cf-modal-desc">
-              CraftForge works offline right away! To sync live between Dad&apos;s device and
-              Kiddo&apos;s Android tablet, paste a free Firebase Firestore config (see README.md) and
-              use the same <strong>Realm Code</strong> on both devices.
-            </p>
-
-            <div className="cf-form-group">
-              <label htmlFor="cf-realm-code">Realm Code (Shared Secret)</label>
-              <input
-                id="cf-realm-code"
-                type="text"
-                className="mc-input"
-                value={realmCodeInput}
-                onChange={(e) => setRealmCodeInput(e.target.value)}
-                placeholder="FAMILY-CRAFT"
-              />
-            </div>
-
-            <div className="cf-form-group">
-              <label htmlFor="cf-firebase-snippet">
-                Quick Paste Firebase Config Snippet (Optional)
-              </label>
-              <textarea
-                id="cf-firebase-snippet"
-                className="mc-input"
-                rows={3}
-                value={snippetInput}
-                onChange={(e) => handleSnippetPaste(e.target.value)}
-                placeholder={'Paste { apiKey: "...", projectId: "..." } here to auto-fill'}
-              />
-            </div>
-
-            <div className="cf-form-row">
-              <div className="cf-form-group">
-                <label htmlFor="cf-project-id">Firebase Project ID</label>
-                <input
-                  id="cf-project-id"
-                  type="text"
-                  className="mc-input"
-                  value={projectIdInput}
-                  onChange={(e) => setProjectIdInput(e.target.value)}
-                  placeholder="my-craftforge-123"
-                />
-              </div>
-
-              <div className="cf-form-group">
-                <label htmlFor="cf-api-key">Web API Key (optional)</label>
-                <input
-                  id="cf-api-key"
-                  type="text"
-                  className="mc-input"
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="AIzaSy..."
-                />
-              </div>
-            </div>
-
-            <div className="cf-sync-status-bar">
-              Status: <strong>{syncStatus.message}</strong>
-            </div>
-
-            {syncError && <div className="cf-sync-error">{syncError}</div>}
-
-            <div className="cf-modal-actions">
-              <button
-                type="button"
-                className="mc-btn mc-btn-green"
-                onClick={() => handleSaveCloudSync(true)}
-              >
-                Save & Enable Cloud Sync
-              </button>
-              {cloudConfig.enabled && (
-                <button
-                  type="button"
-                  className="mc-btn mc-btn-gold"
-                  onClick={() => {
-                    playSound('click');
-                    void syncNow();
-                  }}
-                >
-                  ↻ Sync Now
-                </button>
-              )}
-              <button
-                type="button"
-                className="mc-btn"
-                onClick={() => handleSaveCloudSync(false)}
-              >
-                Use Local Only
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Global Overlays (Cloud Sync, Realm Invite, Join Modal, Toast) */}
+      {globalOverlays}
     </div>
   );
 }

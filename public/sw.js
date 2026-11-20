@@ -1,4 +1,4 @@
-const CACHE_NAME = 'craftforge-v4';
+const CACHE_NAME = 'craftforge-v5';
 const STATIC_ASSETS = [
   './',
   './index.html',

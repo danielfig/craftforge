@@ -766,6 +766,29 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
             </div>
           )}
 
+          {/* Waiting notice when current player is the first/only player in the realm */}
+          {otherPlayers.length === 0 && (
+            <div
+              className="mc-panel-dark"
+              role="status"
+              style={{
+                padding: '10px 12px',
+                border: '2px solid #ffca28',
+                color: '#fff3c4',
+                fontSize: '12px',
+                lineHeight: 1.4,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+              }}
+            >
+              <span style={{ fontSize: '18px', flexShrink: 0 }}>⏳</span>
+              <span>
+                Waiting for another player to log into this Realm so you can send items!
+              </span>
+            </div>
+          )}
+
           {/* Recipient Selector (shown when 3+ players are in the realm) */}
           {otherPlayers.length > 1 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
@@ -851,14 +874,15 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
               alignItems: 'center',
               justifyContent: 'center',
               gap: '8px',
-              opacity: selectedRecipient ? 1 : 0.6,
+              opacity: selectedRecipient ? 1 : 0.55,
+              cursor: selectedRecipient ? 'pointer' : 'not-allowed',
             }}
           >
             <span style={{ fontSize: '19px' }}>🚀</span>
             <span>
               {selectedRecipient
                 ? `SEND TO ${selectedRecipient.name.toUpperCase()}!`
-                : 'ADD ANOTHER PLAYER TO SEND'}
+                : 'WAITING FOR ANOTHER PLAYER...'}
             </span>
           </button>
         </form>

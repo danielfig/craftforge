@@ -6,6 +6,7 @@ export interface PlayerProfile {
   name: string;
   avatarId: string;
   color: string;
+  pinHash?: string;
 }
 
 export type ItemCategory =
