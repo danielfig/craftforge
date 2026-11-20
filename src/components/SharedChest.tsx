@@ -7,9 +7,10 @@ export interface SharedChestProps {
   items: CraftItem[];
   players: Record<PlayerId, PlayerProfile>;
   currentPlayerId: PlayerId;
+  onToggleHideItem?: (itemId: string) => void;
 }
 
-type FilterMode = 'all' | 'graded' | 'pending' | 'player1' | 'player2';
+type FilterMode = 'all' | 'graded' | 'pending' | 'player1' | 'player2' | 'hidden';
 type SortMode = 'newest' | 'highest';
 
 const RARITY_COLORS: Record<ItemRarity, string> = {
@@ -64,15 +65,29 @@ export const SharedChest: React.FC<SharedChestProps> = ({
   items,
   players,
   currentPlayerId,
+  onToggleHideItem,
 }) => {
   const [filter, setFilter] = useState<FilterMode>('all');
   const [sort, setSort] = useState<SortMode>('newest');
   const [inspectItemId, setInspectItemId] = useState<string | null>(null);
 
-  // Compute top stats
+  const nonHiddenItems = useMemo(() => items.filter((i) => !i.hidden), [items]);
+  const myHiddenItems = useMemo(
+    () => items.filter((i) => i.hidden && i.creatorId === currentPlayerId),
+    [items, currentPlayerId]
+  );
+
+  // If the user switches players or unhides their last hidden item, reset filter to 'all'
+  useEffect(() => {
+    if (filter === 'hidden' && myHiddenItems.length === 0) {
+      setFilter('all');
+    }
+  }, [filter, myHiddenItems.length]);
+
+  // Compute top stats (excluding hidden items)
   const stats = useMemo(() => {
-    const totalCrafted = items.length;
-    const gradedItems = items.filter((i) => i.grade !== null);
+    const totalCrafted = nonHiddenItems.length;
+    const gradedItems = nonHiddenItems.filter((i) => i.grade !== null);
     const gradedCount = gradedItems.length;
 
     const avgForPlayer = (pid: PlayerId): string => {
@@ -88,19 +103,21 @@ export const SharedChest: React.FC<SharedChestProps> = ({
       p1Avg: avgForPlayer('player1'),
       p2Avg: avgForPlayer('player2'),
     };
-  }, [items]);
+  }, [nonHiddenItems]);
 
   // Filter & sort items
   const visibleItems = useMemo(() => {
-    let list = items;
-    if (filter === 'graded') {
-      list = list.filter((i) => i.grade !== null);
+    let list = nonHiddenItems;
+    if (filter === 'hidden') {
+      list = myHiddenItems;
+    } else if (filter === 'graded') {
+      list = nonHiddenItems.filter((i) => i.grade !== null);
     } else if (filter === 'pending') {
-      list = list.filter((i) => i.grade === null);
+      list = nonHiddenItems.filter((i) => i.grade === null);
     } else if (filter === 'player1') {
-      list = list.filter((i) => i.creatorId === 'player1');
+      list = nonHiddenItems.filter((i) => i.creatorId === 'player1');
     } else if (filter === 'player2') {
-      list = list.filter((i) => i.creatorId === 'player2');
+      list = nonHiddenItems.filter((i) => i.creatorId === 'player2');
     }
 
     return [...list].sort((a, b) => {
@@ -111,7 +128,7 @@ export const SharedChest: React.FC<SharedChestProps> = ({
       }
       return b.createdAt - a.createdAt;
     });
-  }, [items, filter, sort]);
+  }, [nonHiddenItems, myHiddenItems, filter, sort]);
 
   // Render crisp pixel art URLs once per items change
   const pixelUrls = useMemo(() => {
@@ -359,6 +376,9 @@ export const SharedChest: React.FC<SharedChestProps> = ({
               { id: 'pending', label: 'Waiting for Grade' },
               { id: 'player1', label: `By ${p1.name}` },
               { id: 'player2', label: `By ${p2.name}` },
+              ...(myHiddenItems.length > 0
+                ? [{ id: 'hidden' as FilterMode, label: `🙈 Hidden (${myHiddenItems.length})` }]
+                : []),
             ] as { id: FilterMode; label: string }[]
           ).map((btn) => (
             <button
@@ -851,6 +871,49 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                 </div>
               )}
             </div>
+
+            {/* Creator-Only Hide / Unhide Action */}
+            {onToggleHideItem && inspectItem.creatorId === currentPlayerId && (
+              <div
+                style={{
+                  borderTop: '2px solid rgba(255,255,255,0.15)',
+                  paddingTop: '14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: '10px',
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: "'VT323', monospace",
+                    fontSize: '1.15rem',
+                    color: '#aaaaaa',
+                  }}
+                >
+                  {inspectItem.hidden
+                    ? 'Hidden from Shared Chest & Inbox (still saved safely).'
+                    : 'Only you (the creator) can hide or unhide this item.'}
+                </span>
+                <button
+                  type="button"
+                  className={`mc-btn ${inspectItem.hidden ? 'mc-btn-green' : 'mc-btn-red'}`}
+                  onClick={() => {
+                    playSound('click');
+                    onToggleHideItem(inspectItem.id);
+                    setInspectItemId(null);
+                  }}
+                  style={{
+                    fontSize: '0.78rem',
+                    padding: '10px 16px',
+                    minHeight: '44px',
+                  }}
+                >
+                  {inspectItem.hidden ? '👁 UNHIDE ITEM' : '🙈 HIDE ITEM'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

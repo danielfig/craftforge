@@ -112,9 +112,14 @@ export default function App() {
   const unratedCount = useMemo(() => {
     if (!activePlayerId) return 0;
     return realm.items.filter(
-      (item) => item.recipientId === activePlayerId && item.grade === null
+      (item) => !item.hidden && item.recipientId === activePlayerId && item.grade === null
     ).length;
   }, [realm.items, activePlayerId]);
+
+  const visibleItemCount = useMemo(
+    () => realm.items.filter((item) => !item.hidden).length,
+    [realm.items]
+  );
 
   const handleSelectPlayer = (
     playerId: PlayerId,
@@ -174,6 +179,28 @@ export default function App() {
               grade: clampedGrade,
               gradeComment: comment.trim() || undefined,
               gradedAt: Date.now(),
+            }
+          : item
+      ),
+    };
+    setRealm(nextRealm);
+    if (cloudConfig.enabled && cloudConfig.projectId) {
+      void pushRealmToCloud(cloudConfig, nextRealm).catch(() => {
+        // next poll will reconcile
+      });
+    }
+  };
+
+  const handleToggleHideItem = (itemId: string) => {
+    if (!activePlayerId) return;
+    const nextRealm: RealmState = {
+      ...realm,
+      items: realm.items.map((item) =>
+        item.id === itemId && item.creatorId === activePlayerId
+          ? {
+              ...item,
+              hidden: !item.hidden,
+              hiddenUpdatedAt: Date.now(),
             }
           : item
       ),
@@ -584,7 +611,7 @@ export default function App() {
             setActiveTab('chest');
           }}
         >
-          🧰 Shared Chest ({realm.items.length})
+          🧰 Shared Chest ({visibleItemCount})
         </button>
       </nav>
 
@@ -600,7 +627,7 @@ export default function App() {
 
         {activeTab === 'inbox' && (
           <InboxGrader
-            items={realm.items}
+            items={realm.items.filter((item) => !item.hidden)}
             players={realm.players}
             currentPlayerId={activePlayerId}
             onGradeItem={handleGradeItem}
@@ -612,6 +639,7 @@ export default function App() {
             items={realm.items}
             players={realm.players}
             currentPlayerId={activePlayerId}
+            onToggleHideItem={handleToggleHideItem}
           />
         )}
       </main>

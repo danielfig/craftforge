@@ -285,17 +285,29 @@ export function mergeRealmStates(local: RealmState, remote: RealmState): RealmSt
       byId.set(rItem.id, rItem);
     } else {
       // Prefer whichever copy has a grade, or the more recently graded/created copy
+      let winner = existing;
       const existingGraded = existing.grade !== null;
       const remoteGraded = rItem.grade !== null;
       if (remoteGraded && !existingGraded) {
-        byId.set(rItem.id, rItem);
+        winner = rItem;
       } else if (remoteGraded && existingGraded) {
         const rTime = rItem.gradedAt || rItem.createdAt;
         const eTime = existing.gradedAt || existing.createdAt;
-        if (rTime >= eTime) byId.set(rItem.id, rItem);
+        if (rTime >= eTime) winner = rItem;
       } else if (rItem.createdAt > existing.createdAt) {
-        byId.set(rItem.id, rItem);
+        winner = rItem;
       }
+
+      // Independently merge hidden state using the latest hiddenUpdatedAt timestamp
+      const eHideTs = existing.hiddenUpdatedAt || 0;
+      const rHideTs = rItem.hiddenUpdatedAt || 0;
+      const hiddenSource = rHideTs > eHideTs ? rItem : eHideTs > rHideTs ? existing : winner;
+
+      byId.set(rItem.id, {
+        ...winner,
+        hidden: Boolean(hiddenSource.hidden),
+        hiddenUpdatedAt: Math.max(eHideTs, rHideTs) || undefined,
+      });
     }
   }
 

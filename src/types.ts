@@ -39,6 +39,8 @@ export interface CraftItem {
   grade: number | null; // 0..10 integer, null if unrated
   gradeComment?: string;
   gradedAt?: number;
+  hidden?: boolean;
+  hiddenUpdatedAt?: number;
 }
 
 export interface RealmState {
