@@ -449,12 +449,8 @@ export function validateRealmPassword(raw: string): {
   return { valid: true, cleaned: trimmed };
 }
 
-/**
- * Deterministic 64-bit hex hash combining Realm Name + Realm Code (password).
- * Used to derive the unguessable Firestore document ID without storing the raw password.
- */
-export function hashRealmSecret(realmName: string, realmPassword: string): string {
-  const normalized = `craftforge_realm_v2:${sanitizeRealmName(realmName)}:${realmPassword.trim()}`;
+function hashRealmSecretRaw(realmName: string, rawPassword: string): string {
+  const normalized = `craftforge_realm_v2:${sanitizeRealmName(realmName)}:${rawPassword.trim()}`;
   let h1 = 0x811c9dc5;
   let h2 = 0x9e3779b9;
   for (let i = 0; i < normalized.length; i++) {
@@ -467,6 +463,39 @@ export function hashRealmSecret(realmName: string, realmPassword: string): strin
   h1 ^= h1 >>> 16;
   h2 ^= h2 >>> 13;
   return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+/**
+ * Deterministic 64-bit hex hash combining Realm Name + Realm Code (case-insensitive).
+ * Used to derive the unguessable Firestore document ID without storing the raw password.
+ */
+export function hashRealmSecret(realmName: string, realmPassword: string): string {
+  return hashRealmSecretRaw(realmName, realmPassword.trim().toLowerCase());
+}
+
+/**
+ * Returns candidate hashes for a Realm Name + Realm Code:
+ * canonical case-insensitive (lowercase) first, followed by legacy case-sensitive variants
+ * (exact, UPPERCASE, Title Case) so previously created realms continue to work seamlessly.
+ */
+export function getCandidateRealmHashes(realmName: string, realmPassword: string): string[] {
+  const trimmed = realmPassword.trim();
+  if (!trimmed) return [];
+  const lower = trimmed.toLowerCase();
+  const upper = trimmed.toUpperCase();
+  const title = trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+
+  const variants = [lower, trimmed, upper, title];
+  const seen = new Set<string>();
+  const hashes: string[] = [];
+  for (const variant of variants) {
+    const hash = hashRealmSecretRaw(realmName, variant);
+    if (!seen.has(hash)) {
+      seen.add(hash);
+      hashes.push(hash);
+    }
+  }
+  return hashes;
 }
 
 export function getRealmDocId(
@@ -760,6 +789,26 @@ export async function pullRealmFromCloud(
 
   const parsed = JSON.parse(payload) as RealmState;
   return parsed;
+}
+
+/**
+ * Pulls a realm from Firestore trying the canonical case-insensitive hash first,
+ * then falling back to legacy case-sensitive hashes so existing realms still work.
+ */
+export async function pullRealmFromCloudWithFallback(
+  config: CloudSyncConfig,
+  realmName: string,
+  realmPassword: string
+): Promise<{ remote: RealmState; matchedHash: string } | null> {
+  if (!config.enabled || !config.projectId) return null;
+  const candidateHashes = getCandidateRealmHashes(realmName, realmPassword);
+  for (const hash of candidateHashes) {
+    const remote = await pullRealmFromCloud(config, realmName, realmPassword, hash);
+    if (remote) {
+      return { remote, matchedHash: hash };
+    }
+  }
+  return null;
 }
 
 export async function pushRealmToCloud(

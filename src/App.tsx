@@ -9,6 +9,7 @@ import {
   createStarterRealm,
   findPlayerByName,
   generateItemId,
+  getCandidateRealmHashes,
   getItemVotes,
   hashPin,
   hashRealmSecret,
@@ -18,6 +19,7 @@ import {
   loadRealmState,
   mergeRealmStates,
   pullRealmFromCloud,
+  pullRealmFromCloudWithFallback,
   pushRealmToCloud,
   saveActivePlayer,
   saveRealmState,
@@ -226,11 +228,22 @@ export default function App() {
 
     const cleanRealmName = realmNameCheck.cleaned;
     const cleanRealmPassword = realmCodeCheck.cleaned;
-    const targetHash = hashRealmSecret(cleanRealmName, cleanRealmPassword);
+    const candidateHashes = getCandidateRealmHashes(cleanRealmName, cleanRealmPassword);
+    let targetHash = candidateHashes[0] || hashRealmSecret(cleanRealmName, cleanRealmPassword);
 
     const isSameLocalRealm =
       realmRef.current.realmCode === cleanRealmName &&
-      realmRef.current.realmCodeHash === targetHash;
+      Boolean(
+        (realmRef.current.realmCodeHash &&
+          candidateHashes.includes(realmRef.current.realmCodeHash)) ||
+          (realmRef.current.realmPassword &&
+            realmRef.current.realmPassword.trim().toLowerCase() ===
+              cleanRealmPassword.toLowerCase())
+      );
+
+    if (isSameLocalRealm && realmRef.current.realmCodeHash) {
+      targetHash = realmRef.current.realmCodeHash;
+    }
 
     let workingRealm: RealmState = isSameLocalRealm
       ? {
@@ -240,25 +253,32 @@ export default function App() {
         }
       : createStarterRealm(cleanRealmName, cleanRealmPassword);
 
-    // Verify Realm Name + Realm Code against Firestore
+    // Verify Realm Name + Realm Code against Firestore (case-insensitive with legacy fallback)
     if (cloudConfig.enabled && cloudConfig.projectId) {
       setSyncStatus((prev) => ({ ...prev, state: 'syncing', message: 'Joining Realm...' }));
       try {
-        const remote = await pullRealmFromCloud(
+        const found = await pullRealmFromCloudWithFallback(
           cloudConfig,
           cleanRealmName,
-          cleanRealmPassword,
-          targetHash
+          cleanRealmPassword
         );
-        if (!remote && !isSameLocalRealm) {
+        if (!found && !isSameLocalRealm) {
           setSyncStatus({ state: 'synced', message: 'CraftForge Cloud Ready', lastSyncedAt: null });
           return {
             ok: false,
             error: `Realm "${cleanRealmName}" not found or wrong Realm Code! Double-check both, or tap "Create New Realm".`,
           };
         }
-        if (remote) {
-          workingRealm = mergeRealmStates(workingRealm, remote);
+        if (found) {
+          targetHash = found.matchedHash;
+          workingRealm = mergeRealmStates(
+            {
+              ...workingRealm,
+              realmPassword: cleanRealmPassword,
+              realmCodeHash: targetHash,
+            },
+            found.remote
+          );
         }
         setSyncStatus({
           state: 'synced',
@@ -507,12 +527,15 @@ export default function App() {
 
     const cleanName = nameCheck.cleaned;
     const cleanPassword = codeCheck.cleaned;
-    const hash = hashRealmSecret(cleanName, cleanPassword);
 
-    // Check if a realm with this exact Realm Name + Realm Code already exists in Firestore
+    // Check if a realm with this Realm Name + Realm Code (any casing) already exists in Firestore
     if (cloudConfig.enabled && cloudConfig.projectId) {
       try {
-        const existing = await pullRealmFromCloud(cloudConfig, cleanName, cleanPassword, hash);
+        const existing = await pullRealmFromCloudWithFallback(
+          cloudConfig,
+          cleanName,
+          cleanPassword
+        );
         if (existing) {
           return {
             ok: false,
@@ -567,21 +590,37 @@ export default function App() {
 
     const cleanName = nameCheck.cleaned;
     const cleanPassword = codeCheck.cleaned;
-    const hash = hashRealmSecret(cleanName, cleanPassword);
+    const candidateHashes = getCandidateRealmHashes(cleanName, cleanPassword);
+    const hash = candidateHashes[0] || hashRealmSecret(cleanName, cleanPassword);
 
-    const isSame = realm.realmCode === cleanName && realm.realmCodeHash === hash;
+    const isSame =
+      realm.realmCode === cleanName &&
+      Boolean(
+        (realm.realmCodeHash && candidateHashes.includes(realm.realmCodeHash)) ||
+          (realm.realmPassword &&
+            realm.realmPassword.trim().toLowerCase() === cleanPassword.toLowerCase())
+      );
     const nextRealm: RealmState = isSame
-      ? { ...realm, realmPassword: cleanPassword, realmCodeHash: hash }
+      ? {
+          ...realm,
+          realmPassword: cleanPassword,
+          realmCodeHash: realm.realmCodeHash || hash,
+        }
       : createStarterRealm(cleanName, cleanPassword);
 
     setRealm(nextRealm);
     setActivePlayerId(null);
 
     if (cloudConfig.enabled && cloudConfig.projectId) {
-      void pullRealmFromCloud(cloudConfig, cleanName, cleanPassword, hash)
-        .then((remote) => {
-          if (remote) {
-            setRealm((curr) => mergeRealmStates(curr, remote));
+      void pullRealmFromCloudWithFallback(cloudConfig, cleanName, cleanPassword)
+        .then((found) => {
+          if (found) {
+            setRealm((curr) =>
+              mergeRealmStates(
+                { ...curr, realmCodeHash: found.matchedHash },
+                found.remote
+              )
+            );
             setSyncStatus({
               state: 'synced',
               message: `Synced (${cleanName})`,
