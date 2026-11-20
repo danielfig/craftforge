@@ -1,16 +1,14 @@
-import { sanitizeRealmCode } from '../store/itemStore';
+import { sanitizeRealmName } from '../store/itemStore';
 
 export interface RealmInvitePayload {
-  realmCode: string;
-  projectId?: string;
-  apiKey?: string;
+  realmName: string;
+  realmCode: string; // Realm password
   inviterName?: string;
 }
 
 interface CompactInvitePayload {
-  r: string;
-  p?: string;
-  k?: string;
+  n: string;
+  c: string;
   f?: string;
 }
 
@@ -34,21 +32,40 @@ const REALM_NOUNS = [
   'KEEP',
   'CRAFT',
   'PEAK',
-  'VALLEY',
-  'CITADEL',
   'VAULT',
   'GUILD',
   'COVE',
-  'BASTION',
   'TOWER',
   'CHEST',
+  'CAMP',
 ];
 
-export function generateRandomRealmCode(): string {
+const PASSWORD_WORDS = [
+  'creeper',
+  'diamond',
+  'emerald',
+  'pickaxe',
+  'redstone',
+  'obsidian',
+  'villager',
+  'enderman',
+  'beacon',
+  'nether',
+  'torch',
+  'anvil',
+];
+
+export function generateRandomRealmName(): string {
   const adj = REALM_ADJECTIVES[Math.floor(Math.random() * REALM_ADJECTIVES.length)];
   const noun = REALM_NOUNS[Math.floor(Math.random() * REALM_NOUNS.length)];
   const num = Math.floor(10 + Math.random() * 90);
-  return `${adj}-${noun}-${num}`;
+  return sanitizeRealmName(`${adj}-${noun}${num}`);
+}
+
+export function generateRandomRealmPassword(): string {
+  const word = PASSWORD_WORDS[Math.floor(Math.random() * PASSWORD_WORDS.length)];
+  const num = Math.floor(100 + Math.random() * 900);
+  return `${word}${num}`;
 }
 
 function toBase64Url(input: string): string {
@@ -75,14 +92,9 @@ function fromBase64Url(encoded: string): string {
 
 export function encodeInvitePayload(payload: RealmInvitePayload): string {
   const compact: CompactInvitePayload = {
-    r: sanitizeRealmCode(payload.realmCode),
+    n: sanitizeRealmName(payload.realmName),
+    c: payload.realmCode.trim(),
   };
-  if (payload.projectId?.trim()) {
-    compact.p = payload.projectId.trim();
-  }
-  if (payload.apiKey?.trim()) {
-    compact.k = payload.apiKey.trim();
-  }
   if (payload.inviterName?.trim()) {
     compact.f = payload.inviterName.trim().slice(0, 24);
   }
@@ -95,13 +107,18 @@ export function decodeInvitePayload(encoded: string): RealmInvitePayload | null 
     if (!trimmed) return null;
     const json = fromBase64Url(trimmed);
     const parsed = JSON.parse(json) as Partial<CompactInvitePayload>;
-    if (!parsed || typeof parsed.r !== 'string' || !parsed.r.trim()) {
+    if (
+      !parsed ||
+      typeof parsed.n !== 'string' ||
+      !parsed.n.trim() ||
+      typeof parsed.c !== 'string' ||
+      !parsed.c.trim()
+    ) {
       return null;
     }
     return {
-      realmCode: sanitizeRealmCode(parsed.r),
-      projectId: typeof parsed.p === 'string' && parsed.p.trim() ? parsed.p.trim() : undefined,
-      apiKey: typeof parsed.k === 'string' && parsed.k.trim() ? parsed.k.trim() : undefined,
+      realmName: sanitizeRealmName(parsed.n),
+      realmCode: parsed.c.trim(),
       inviterName:
         typeof parsed.f === 'string' && parsed.f.trim() ? parsed.f.trim().slice(0, 24) : undefined,
     };
@@ -111,7 +128,7 @@ export function decodeInvitePayload(encoded: string): RealmInvitePayload | null 
 }
 
 export function getAppBaseUrl(): string {
-  if (typeof window === 'undefined') return 'https://craftforge.app/';
+  if (typeof window === 'undefined') return 'https://danielfig.github.io/craftforge/';
   return `${window.location.origin}${window.location.pathname}`;
 }
 
@@ -125,7 +142,6 @@ export function parseInviteFromLocation(loc?: Location): RealmInvitePayload | nu
   const target = loc || (typeof window !== 'undefined' ? window.location : undefined);
   if (!target) return null;
 
-  // Prefer hash (#join=...) so keys/codes never hit server logs or Referer headers
   const hash = target.hash || '';
   const hashMatch = hash.match(/(?:^#|&)join=([^&]+)/);
   if (hashMatch && hashMatch[1]) {
@@ -133,7 +149,6 @@ export function parseInviteFromLocation(loc?: Location): RealmInvitePayload | nu
     if (decoded) return decoded;
   }
 
-  // Fallback to query params (?join=... or ?realm=...)
   const params = new URLSearchParams(target.search || '');
   const queryJoin = params.get('join');
   if (queryJoin) {
@@ -141,12 +156,12 @@ export function parseInviteFromLocation(loc?: Location): RealmInvitePayload | nu
     if (decoded) return decoded;
   }
 
-  const queryRealm = params.get('realm');
-  if (queryRealm && queryRealm.trim()) {
+  const queryName = params.get('realmName') || params.get('realm');
+  const queryCode = params.get('realmCode') || params.get('code');
+  if (queryName?.trim() && queryCode?.trim()) {
     return {
-      realmCode: sanitizeRealmCode(queryRealm),
-      projectId: params.get('projectId')?.trim() || undefined,
-      apiKey: params.get('apiKey')?.trim() || undefined,
+      realmName: sanitizeRealmName(queryName),
+      realmCode: queryCode.trim(),
       inviterName: params.get('from')?.trim() || undefined,
     };
   }
@@ -161,79 +176,49 @@ export function clearInviteFromUrl(): void {
 }
 
 export interface InviteEmailOptions {
+  realmName: string;
   realmCode: string;
   inviterName?: string;
-  inviteeName?: string;
   personalNote?: string;
   joinUrl: string;
   appUrl?: string;
-  cloudProjectId?: string;
-  cloudApiKey?: string;
-  playerNames?: string[];
 }
 
 export function buildInviteEmailContent(options: InviteEmailOptions): {
   subject: string;
   body: string;
 } {
-  const realmCode = sanitizeRealmCode(options.realmCode);
+  const realmName = sanitizeRealmName(options.realmName);
+  const realmCode = options.realmCode.trim();
   const inviter = options.inviterName?.trim() || 'A friend';
-  const greeting = options.inviteeName?.trim() ? `Hi ${options.inviteeName.trim()},` : 'Hi there,';
   const appUrl = options.appUrl || getAppBaseUrl();
-  const hasCloud = Boolean(options.cloudProjectId?.trim());
 
-  const subject = `Join my CraftForge Realm: ${realmCode}!`;
+  const subject = `Join my CraftForge Realm: ${realmName}!`;
 
   const lines: string[] = [
-    greeting,
+    'Hi!',
     '',
-    `${inviter} invited you to join their CraftForge Minecraft Item Studio realm (${realmCode})!`,
-    'Design 16x16 pixel-art Minecraft items, send them over, and rate creations from 0 to 10.',
+    `${inviter} invited you to join their CraftForge realm "${realmName}" to design Minecraft items and share them in our chest!`,
   ];
 
   if (options.personalNote?.trim()) {
-    lines.push('', `Message from ${inviter}:`, `"${options.personalNote.trim()}"`);
+    lines.push('', `"${options.personalNote.trim()}"`);
   }
 
   lines.push(
     '',
-    '========================================',
-    'OPTION 1: 1-CLICK JOIN (EASIEST!)',
-    '========================================',
-    'Click or tap this link to open CraftForge and join automatically:',
+    '1-Tap Join Link:',
     options.joinUrl,
     '',
-    '========================================',
-    'OPTION 2: JOIN MANUALLY',
-    '========================================',
+    'Or join manually:',
     `1. Open CraftForge: ${appUrl}`,
-    `2. Enter this Realm Code: ${realmCode}`
+    `2. Realm Name: ${realmName}`,
+    `3. Realm Code: ${realmCode}`,
+    '4. Pick a Crafter Name & 3-digit PIN and start crafting!',
+    '',
+    'See you in the realm!',
+    '— CraftForge'
   );
-
-  if (hasCloud) {
-    lines.push(
-      '3. Tap "☁ Sync" in the top bar and enter:',
-      `   - Firebase Project ID: ${options.cloudProjectId!.trim()}`
-    );
-    if (options.cloudApiKey?.trim()) {
-      lines.push(`   - Web API Key: ${options.cloudApiKey.trim()}`);
-    }
-    lines.push(
-      '   Then tap "Save & Enable Cloud Sync".',
-      '4. Enter your Crafter Name & a 3-digit PIN, pick your avatar, and start crafting!'
-    );
-  } else {
-    lines.push(
-      '3. Enter your Crafter Name & a 3-digit PIN, pick your avatar, and start crafting!',
-      '   (Note: To sync live across separate devices, enable free Firebase Cloud Sync under "☁ Cloud Sync".)'
-    );
-  }
-
-  if (options.playerNames && options.playerNames.length > 0) {
-    lines.push('', `Current Crafters in this Realm: ${options.playerNames.join(', ')}`);
-  }
-
-  lines.push('', 'Happy crafting!', '— CraftForge');
 
   return {
     subject,

@@ -1,18 +1,26 @@
 import React, { useState, useEffect } from 'react';
 import { AVATARS } from '../assets/textures';
-import { SyncStatus } from '../store/itemStore';
+import {
+  REALM_NAME_MAX,
+  REALM_PASSWORD_MAX,
+  SyncStatus,
+  sanitizeRealmName,
+  validateRealmName,
+  validateRealmPassword,
+} from '../store/itemStore';
 import { playSound } from '../utils/sounds';
 
 export interface ProfileGateProps {
-  realmCode: string;
+  realmName: string;
+  realmPassword?: string;
   syncStatus: SyncStatus;
-  onOpenSyncModal: () => void;
-  onOpenRealmInvite?: (initialTab: 'create' | 'invite') => void;
+  onOpenRealmInvite: (initialTab: 'create' | 'invite') => void;
   onLogin: (params: {
     name: string;
     pin: string;
     avatarId: string;
-    realmCode: string;
+    realmName: string;
+    realmPassword: string;
   }) => Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -27,9 +35,9 @@ const SPLASH_TEXTS = [
 ];
 
 export const ProfileGate: React.FC<ProfileGateProps> = ({
-  realmCode,
+  realmName,
+  realmPassword,
   syncStatus,
-  onOpenSyncModal,
   onOpenRealmInvite,
   onLogin,
 }) => {
@@ -37,16 +45,24 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
   const [pin, setPin] = useState<string>('');
   const [showPin, setShowPin] = useState<boolean>(false);
   const [avatarIdx, setAvatarIdx] = useState<number>(0);
-  const [localRealm, setLocalRealm] = useState<string>(realmCode || 'FAMILY-CRAFT');
+  const [localRealmName, setLocalRealmName] = useState<string>(realmName || '');
+  const [localRealmCode, setLocalRealmCode] = useState<string>(realmPassword || '');
+  const [showRealmCode, setShowRealmCode] = useState<boolean>(false);
   const [splashIndex, setSplashIndex] = useState<number>(0);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
 
   useEffect(() => {
-    if (realmCode) {
-      setLocalRealm(realmCode);
+    if (realmName) {
+      setLocalRealmName(realmName);
     }
-  }, [realmCode]);
+  }, [realmName]);
+
+  useEffect(() => {
+    if (realmPassword !== undefined) {
+      setLocalRealmCode(realmPassword);
+    }
+  }, [realmPassword]);
 
   const currentAvatar =
     AVATARS && AVATARS.length > 0 ? AVATARS[avatarIdx % AVATARS.length] : null;
@@ -85,21 +101,35 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
       return;
     }
 
+    const nameCheck = validateRealmName(localRealmName);
+    if (!nameCheck.valid) {
+      playSound('click');
+      setError(nameCheck.error || 'Please enter a valid Realm Name.');
+      return;
+    }
+
+    const codeCheck = validateRealmPassword(localRealmCode);
+    if (!codeCheck.valid) {
+      playSound('click');
+      setError(codeCheck.error || 'Please enter a valid Realm Code.');
+      return;
+    }
+
     playSound('click');
     setError('');
     setSubmitting(true);
 
     try {
-      const cleanRealm = localRealm.trim().toUpperCase() || 'FAMILY-CRAFT';
       const result = await onLogin({
         name: trimmedName,
         pin,
         avatarId: currentAvatar ? currentAvatar.id : 'knight',
-        realmCode: cleanRealm,
+        realmName: nameCheck.cleaned,
+        realmPassword: codeCheck.cleaned,
       });
 
       if (!result.ok) {
-        setError(result.error || 'Login failed. Please check your 3-digit PIN.');
+        setError(result.error || 'Login failed. Please check your Realm Name, Realm Code, and PIN.');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed. Please try again.');
@@ -427,7 +457,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
           </div>
         )}
 
-        {/* Big Chunky Green PLAY / LOGIN Button */}
+        {/* Big Chunky Green PLAY / JOIN REALM Button */}
         <button
           type="submit"
           className="mc-btn mc-btn-green"
@@ -436,21 +466,21 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
             width: '100%',
             minHeight: '58px',
             fontFamily: "'Press Start 2P', monospace",
-            fontSize: '0.98rem',
+            fontSize: '0.94rem',
             letterSpacing: '0.04em',
             opacity: submitting ? 0.65 : 1,
             cursor: submitting ? 'wait' : 'pointer',
           }}
         >
-          {submitting ? 'CHECKING PIN...' : 'PLAY / LOGIN'}
+          {submitting ? 'JOINING REALM...' : '⚔ JOIN REALM & PLAY'}
         </button>
       </form>
 
-      {/* Bottom Realm Code + Cloud Sync Bar */}
+      {/* Bottom Realm Name + Realm Code Bar */}
       <div
         className="mc-panel-dark cf-realm-bar"
         style={{
-          padding: '14px 18px',
+          padding: '16px 18px',
           display: 'flex',
           flexDirection: 'column',
           gap: '12px',
@@ -458,55 +488,98 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
       >
         <div
           style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '10px',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+            gap: '12px',
           }}
         >
-          <div style={{ flex: '1 1 160px' }}>
-            <div
+          <div>
+            <label
+              htmlFor="gate-realm-name"
               style={{
+                display: 'block',
                 fontFamily: "'Silkscreen', monospace",
-                fontSize: '0.82rem',
+                fontSize: '0.76rem',
                 color: '#55ff55',
-                marginBottom: '2px',
+                marginBottom: '6px',
               }}
             >
-              REALM CODE
-            </div>
-            <div
+              REALM NAME
+            </label>
+            <input
+              id="gate-realm-name"
+              type="text"
+              className="mc-input"
+              value={localRealmName}
+              maxLength={REALM_NAME_MAX}
+              autoCapitalize="characters"
+              autoComplete="off"
+              placeholder="DRAGONKEEP"
+              onChange={(e) => {
+                setLocalRealmName(sanitizeRealmName(e.target.value));
+                if (error) setError('');
+              }}
               style={{
-                fontFamily: "'VT323', monospace",
-                fontSize: '1.15rem',
-                color: '#cccccc',
+                width: '100%',
+                boxSizing: 'border-box',
+                fontFamily: "'Press Start 2P', monospace",
+                fontSize: '0.78rem',
+                padding: '10px 12px',
+                textAlign: 'center',
+                letterSpacing: '0.06em',
               }}
-            >
-              Same code = shared chest & inbox
-            </div>
+            />
           </div>
 
-          <input
-            type="text"
-            className="mc-input"
-            aria-label="Realm Code"
-            value={localRealm}
-            maxLength={24}
-            placeholder="FAMILY-CRAFT"
-            onChange={(e) => setLocalRealm(e.target.value.toUpperCase())}
-            style={{
-              flex: '1 1 180px',
-              maxWidth: '240px',
-              width: '100%',
-              boxSizing: 'border-box',
-              fontFamily: "'Press Start 2P', monospace",
-              fontSize: '0.8rem',
-              padding: '10px 12px',
-              textAlign: 'center',
-              letterSpacing: '0.06em',
-            }}
-          />
+          <div>
+            <label
+              htmlFor="gate-realm-code"
+              style={{
+                display: 'block',
+                fontFamily: "'Silkscreen', monospace",
+                fontSize: '0.76rem',
+                color: '#ffdf5d',
+                marginBottom: '6px',
+              }}
+            >
+              REALM CODE (PASSWORD)
+            </label>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <input
+                id="gate-realm-code"
+                type={showRealmCode ? 'text' : 'password'}
+                className="mc-input"
+                value={localRealmCode}
+                maxLength={REALM_PASSWORD_MAX}
+                autoComplete="current-password"
+                placeholder="creeper42"
+                onChange={(e) => {
+                  setLocalRealmCode(e.target.value.replace(/\s+/g, ''));
+                  if (error) setError('');
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  boxSizing: 'border-box',
+                  fontSize: '0.95rem',
+                  padding: '10px 12px',
+                  textAlign: 'center',
+                }}
+              />
+              <button
+                type="button"
+                className="mc-btn"
+                aria-label={showRealmCode ? 'Hide Realm Code' : 'Show Realm Code'}
+                onClick={() => {
+                  playSound('click');
+                  setShowRealmCode((prev) => !prev);
+                }}
+                style={{ minWidth: '44px', padding: '6px 10px' }}
+              >
+                {showRealmCode ? '🙈' : '👁'}
+              </button>
+            </div>
+          </div>
         </div>
 
         <div
@@ -533,7 +606,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
             <span
               style={{
                 fontFamily: "'VT323', monospace",
-                fontSize: '1.2rem',
+                fontSize: '1.18rem',
                 color: '#dcdcdc',
               }}
             >
@@ -542,46 +615,12 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-            {onOpenRealmInvite && (
-              <>
-                <button
-                  type="button"
-                  className="mc-btn mc-btn-green"
-                  onClick={() => {
-                    playSound('click');
-                    onOpenRealmInvite('create');
-                  }}
-                  style={{
-                    minHeight: '44px',
-                    padding: '8px 12px',
-                    fontSize: '0.76rem',
-                  }}
-                >
-                  🏰 Create Realm
-                </button>
-                <button
-                  type="button"
-                  className="mc-btn mc-btn-gold"
-                  onClick={() => {
-                    playSound('click');
-                    onOpenRealmInvite('invite');
-                  }}
-                  style={{
-                    minHeight: '44px',
-                    padding: '8px 12px',
-                    fontSize: '0.76rem',
-                  }}
-                >
-                  ✉ Email Invite
-                </button>
-              </>
-            )}
             <button
               type="button"
-              className="mc-btn"
+              className="mc-btn mc-btn-green"
               onClick={() => {
                 playSound('click');
-                onOpenSyncModal();
+                onOpenRealmInvite('create');
               }}
               style={{
                 minHeight: '44px',
@@ -589,7 +628,22 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
                 fontSize: '0.76rem',
               }}
             >
-              ☁ Cloud Sync
+              🏰 Create New Realm
+            </button>
+            <button
+              type="button"
+              className="mc-btn mc-btn-gold"
+              onClick={() => {
+                playSound('click');
+                onOpenRealmInvite('invite');
+              }}
+              style={{
+                minHeight: '44px',
+                padding: '8px 14px',
+                fontSize: '0.76rem',
+              }}
+            >
+              ✉ Email Invite
             </button>
           </div>
         </div>

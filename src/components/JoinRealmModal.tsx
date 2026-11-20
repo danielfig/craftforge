@@ -4,19 +4,18 @@ import { playSound } from '../utils/sounds';
 
 export interface JoinRealmModalProps {
   invite: RealmInvitePayload;
-  currentRealmCode: string;
+  currentRealmName: string;
   onAccept: (invite: RealmInvitePayload) => void;
   onDismiss: () => void;
 }
 
 export const JoinRealmModal: React.FC<JoinRealmModalProps> = ({
   invite,
-  currentRealmCode,
+  currentRealmName,
   onAccept,
   onDismiss,
 }) => {
-  const isDifferentRealm = invite.realmCode !== currentRealmCode;
-  const hasCloud = Boolean(invite.projectId);
+  const isDifferentRealm = invite.realmName !== currentRealmName;
 
   return (
     <div
@@ -30,7 +29,7 @@ export const JoinRealmModal: React.FC<JoinRealmModalProps> = ({
         className="mc-panel"
         style={{
           width: '100%',
-          maxWidth: '520px',
+          maxWidth: '480px',
           padding: '20px',
           display: 'flex',
           flexDirection: 'column',
@@ -74,56 +73,27 @@ export const JoinRealmModal: React.FC<JoinRealmModalProps> = ({
           }}
         >
           <div style={{ fontSize: '0.72rem', color: '#aaaaaa', marginBottom: '6px' }}>
-            REALM CODE
+            REALM NAME
           </div>
           <div
             style={{
               fontFamily: "'Press Start 2P', monospace",
-              fontSize: '1.1rem',
+              fontSize: '1.05rem',
               color: '#55ff55',
-              letterSpacing: '0.08em',
+              letterSpacing: '0.06em',
             }}
           >
-            {invite.realmCode}
+            {invite.realmName}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: '#ffdf5d', marginTop: '8px' }}>
+            ✓ Realm Code included in invite link
           </div>
         </div>
 
-        {hasCloud ? (
-          <div
-            style={{
-              padding: '10px 12px',
-              background: '#1d4d16',
-              color: '#d4ffca',
-              border: '2px solid #55ff55',
-              fontSize: '0.86rem',
-              lineHeight: 1.4,
-            }}
-          >
-            ☁ <strong>Cloud Sync Included!</strong> Your device will automatically connect to live
-            cloud sync (<code>{invite.projectId}</code>) and pull the realm&apos;s players &amp;
-            items.
-          </div>
-        ) : (
-          <div
-            style={{
-              padding: '10px 12px',
-              background: '#3d2c0a',
-              color: '#ffe8a3',
-              border: '2px solid #ffaa00',
-              fontSize: '0.86rem',
-              lineHeight: 1.4,
-            }}
-          >
-            📱 This invite sets your Realm Code to <strong>{invite.realmCode}</strong>. You can
-            also enable <strong>☁ Sync</strong> in the top bar for live cross-device sync.
-          </div>
-        )}
-
         {isDifferentRealm && (
-          <div style={{ fontSize: '0.82rem', color: '#444' }}>
-            Switching from your current realm (<strong>{currentRealmCode}</strong>) to{' '}
-            <strong>{invite.realmCode}</strong>. Next, enter your Crafter Name &amp; 3-digit PIN to
-            log in!
+          <div style={{ fontSize: '0.84rem', color: '#444' }}>
+            Tap <strong>Join Realm</strong> to load <strong>{invite.realmName}</strong>, then enter
+            your Crafter Name &amp; 3-digit PIN to start crafting!
           </div>
         )}
 

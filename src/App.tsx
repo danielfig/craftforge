@@ -9,18 +9,18 @@ import {
   findPlayerByName,
   generateItemId,
   hashPin,
+  hashRealmSecret,
   isDemoItem,
   loadActivePlayer,
   loadCloudConfig,
   loadRealmState,
   mergeRealmStates,
-  parseFirebaseSnippet,
   pullRealmFromCloud,
   pushRealmToCloud,
-  sanitizeRealmCode,
   saveActivePlayer,
-  saveCloudConfig,
   saveRealmState,
+  validateRealmName,
+  validateRealmPassword,
 } from './store/itemStore';
 import { ProfileGate } from './components/ProfileGate';
 import { ItemStudio } from './components/ItemStudio';
@@ -47,26 +47,22 @@ export default function App() {
   const [activePlayerId, setActivePlayerId] = useState<PlayerId | null>(() => loadActivePlayer());
   const [activeTab, setActiveTab] = useState<ActiveTab>('studio');
   const [muted, setMutedState] = useState<boolean>(() => isMuted());
-  const [cloudConfig, setCloudConfig] = useState<CloudSyncConfig>(() => loadCloudConfig());
+  const [cloudConfig] = useState<CloudSyncConfig>(() => loadCloudConfig());
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => ({
-    state: loadCloudConfig().enabled ? 'syncing' : 'local',
-    message: loadCloudConfig().enabled ? 'Connecting to Realm...' : 'Local Mode',
+    state: loadRealmState().realmCodeHash ? 'syncing' : 'synced',
+    message: loadRealmState().realmCodeHash
+      ? 'Connecting to CraftForge Cloud...'
+      : 'CraftForge Cloud Ready',
     lastSyncedAt: null,
   }));
 
-  // Cloud Sync Modal state
-  const [showSyncModal, setShowSyncModal] = useState(false);
+  // Realm & Invite Modal state
   const [showRealmModal, setShowRealmModal] = useState(false);
   const [realmModalTab, setRealmModalTab] = useState<RealmModalTab>('create');
   const [pendingInvite, setPendingInvite] = useState<RealmInvitePayload | null>(() =>
     parseInviteFromLocation()
   );
   const [toastMessage, setToastMessage] = useState<string>('');
-  const [snippetInput, setSnippetInput] = useState('');
-  const [projectIdInput, setProjectIdInput] = useState(cloudConfig.projectId);
-  const [apiKeyInput, setApiKeyInput] = useState(cloudConfig.apiKey);
-  const [realmCodeInput, setRealmCodeInput] = useState(realm.realmCode);
-  const [syncError, setSyncError] = useState('');
 
   // Keep latest realm in a ref for async cloud sync merges
   const realmRef = useRef(realm);
@@ -116,9 +112,19 @@ export default function App() {
         return;
       }
 
+      if (!current.realmCodeHash && !current.realmPassword) {
+        setSyncStatus({ state: 'synced', message: 'CraftForge Cloud Ready', lastSyncedAt: null });
+        return;
+      }
+
       setSyncStatus((prev) => ({ ...prev, state: 'syncing', message: 'Syncing...' }));
       try {
-        const remote = await pullRealmFromCloud(cfg, current.realmCode);
+        const remote = await pullRealmFromCloud(
+          cfg,
+          current.realmCode,
+          current.realmPassword,
+          current.realmCodeHash
+        );
         let finalState = current;
         if (remote) {
           finalState = mergeRealmStates(current, remote);
@@ -138,10 +144,14 @@ export default function App() {
     [cloudConfig]
   );
 
-  // Poll Firestore every 8s when Cloud Sync is enabled
+  // Poll Firestore every 8s when connected to a Realm
   useEffect(() => {
     if (!cloudConfig.enabled || !cloudConfig.projectId) {
       setSyncStatus({ state: 'local', message: 'Local Mode', lastSyncedAt: null });
+      return;
+    }
+    if (!realm.realmCodeHash && !realm.realmPassword) {
+      setSyncStatus({ state: 'synced', message: 'CraftForge Cloud Ready', lastSyncedAt: null });
       return;
     }
     void syncNow();
@@ -149,7 +159,7 @@ export default function App() {
       void syncNow();
     }, 8000);
     return () => window.clearInterval(timer);
-  }, [cloudConfig, realm.realmCode, syncNow]);
+  }, [cloudConfig, realm.realmCode, realm.realmCodeHash, realm.realmPassword, syncNow]);
 
   const currentPlayer: PlayerProfile | null =
     activePlayerId && realm.players[activePlayerId] ? realm.players[activePlayerId] : null;
@@ -178,7 +188,8 @@ export default function App() {
     name: string;
     pin: string;
     avatarId: string;
-    realmCode: string;
+    realmName: string;
+    realmPassword: string;
   }): Promise<{ ok: boolean; error?: string }> => {
     const cleanName = params.name.trim();
     const cleanPin = params.pin.trim();
@@ -189,28 +200,62 @@ export default function App() {
       return { ok: false, error: 'PIN must be exactly 3 digits (000–999)!' };
     }
 
-    const cleanCode = sanitizeRealmCode(params.realmCode);
-    let workingRealm: RealmState = {
-      ...realmRef.current,
-      realmCode: cleanCode,
-    };
+    const realmNameCheck = validateRealmName(params.realmName);
+    if (!realmNameCheck.valid) {
+      return { ok: false, error: realmNameCheck.error || 'Invalid Realm Name.' };
+    }
+    const realmCodeCheck = validateRealmPassword(params.realmPassword);
+    if (!realmCodeCheck.valid) {
+      return { ok: false, error: realmCodeCheck.error || 'Invalid Realm Code.' };
+    }
 
-    // Pull latest realm from Firestore before checking/claiming name so PINs sync across devices
+    const cleanRealmName = realmNameCheck.cleaned;
+    const cleanRealmPassword = realmCodeCheck.cleaned;
+    const targetHash = hashRealmSecret(cleanRealmName, cleanRealmPassword);
+
+    const isSameLocalRealm =
+      realmRef.current.realmCode === cleanRealmName &&
+      realmRef.current.realmCodeHash === targetHash;
+
+    let workingRealm: RealmState = isSameLocalRealm
+      ? {
+          ...realmRef.current,
+          realmPassword: cleanRealmPassword,
+          realmCodeHash: targetHash,
+        }
+      : createStarterRealm(cleanRealmName, cleanRealmPassword);
+
+    // Verify Realm Name + Realm Code against Firestore
     if (cloudConfig.enabled && cloudConfig.projectId) {
-      setSyncStatus((prev) => ({ ...prev, state: 'syncing', message: 'Checking Realm...' }));
+      setSyncStatus((prev) => ({ ...prev, state: 'syncing', message: 'Joining Realm...' }));
       try {
-        const remote = await pullRealmFromCloud(cloudConfig, cleanCode);
+        const remote = await pullRealmFromCloud(
+          cloudConfig,
+          cleanRealmName,
+          cleanRealmPassword,
+          targetHash
+        );
+        if (!remote && !isSameLocalRealm) {
+          setSyncStatus({ state: 'synced', message: 'CraftForge Cloud Ready', lastSyncedAt: null });
+          return {
+            ok: false,
+            error: `Realm "${cleanRealmName}" not found or wrong Realm Code! Double-check both, or tap "Create New Realm".`,
+          };
+        }
         if (remote) {
           workingRealm = mergeRealmStates(workingRealm, remote);
         }
         setSyncStatus({
           state: 'synced',
-          message: `Synced (${cleanCode})`,
+          message: `Synced (${cleanRealmName})`,
           lastSyncedAt: Date.now(),
         });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Sync failed';
+        const msg = err instanceof Error ? err.message : 'Could not reach Firestore';
         setSyncStatus({ state: 'error', message: msg, lastSyncedAt: null });
+        if (!isSameLocalRealm) {
+          return { ok: false, error: `Could not connect to CraftForge Cloud: ${msg}` };
+        }
       }
     }
 
@@ -226,7 +271,6 @@ export default function App() {
         }
         loggedInId = existing.id;
       } else {
-        // Legacy player without pinHash: lock with first entered 3-digit PIN
         const lockedPlayer: PlayerProfile = {
           ...existing,
           pinHash: expectedHash,
@@ -261,7 +305,6 @@ export default function App() {
     }
 
     setRealm(nextRealm);
-    setRealmCodeInput(cleanCode);
     setActivePlayerId(loggedInId);
 
     if (cloudConfig.enabled && cloudConfig.projectId) {
@@ -269,7 +312,7 @@ export default function App() {
         await pushRealmToCloud(cloudConfig, nextRealm);
         setSyncStatus({
           state: 'synced',
-          message: `Synced (${cleanCode})`,
+          message: `Synced (${cleanRealmName})`,
           lastSyncedAt: Date.now(),
         });
       } catch (err) {
@@ -378,141 +421,114 @@ export default function App() {
     setActivePlayerId(null);
   };
 
-  const handleOpenSyncModal = () => {
-    playSound('click');
-    setProjectIdInput(cloudConfig.projectId);
-    setApiKeyInput(cloudConfig.apiKey);
-    setRealmCodeInput(realm.realmCode);
-    setSnippetInput('');
-    setSyncError('');
-    setShowSyncModal(true);
-  };
-
-  const handleSnippetPaste = (val: string) => {
-    setSnippetInput(val);
-    const parsed = parseFirebaseSnippet(val);
-    if (parsed) {
-      setProjectIdInput(parsed.projectId);
-      if (parsed.apiKey) setApiKeyInput(parsed.apiKey);
-      setSyncError('');
-    }
-  };
-
-  const handleSaveCloudSync = (enable: boolean) => {
-    playSound('click');
-    const cleanCode = sanitizeRealmCode(realmCodeInput);
-    const updatedRealm: RealmState = { ...realm, realmCode: cleanCode };
-    setRealm(updatedRealm);
-
-    if (!enable) {
-      const disabledCfg: CloudSyncConfig = {
-        enabled: false,
-        projectId: projectIdInput.trim(),
-        apiKey: apiKeyInput.trim(),
-      };
-      setCloudConfig(disabledCfg);
-      saveCloudConfig(disabledCfg);
-      setSyncStatus({ state: 'local', message: 'Local Mode', lastSyncedAt: null });
-      setShowSyncModal(false);
-      return;
-    }
-
-    if (!projectIdInput.trim()) {
-      setSyncError('Please enter your Firebase Project ID (or paste your Firebase config snippet).');
-      return;
-    }
-
-    const nextCfg: CloudSyncConfig = {
-      enabled: true,
-      projectId: projectIdInput.trim(),
-      apiKey: apiKeyInput.trim(),
-    };
-    setCloudConfig(nextCfg);
-    saveCloudConfig(nextCfg);
-    setShowSyncModal(false);
-    void syncNow(nextCfg, updatedRealm);
-  };
-
   const handleOpenRealmModal = (tab: RealmModalTab) => {
     playSound('click');
     setRealmModalTab(tab);
     setShowRealmModal(true);
   };
 
-  const handleCreateRealm = (options: CreateRealmOptions) => {
-    const cleanCode = sanitizeRealmCode(options.realmCode);
-    const nextPlayers: Record<PlayerId, PlayerProfile> = options.keepPlayers
-      ? realm.players
-      : {};
-    const nextItems: CraftItem[] = options.freshChest
-      ? createStarterRealm(cleanCode).items
-      : realm.items.map((item) => ({ ...item, realmCode: cleanCode }));
+  const handleCreateRealm = async (
+    options: CreateRealmOptions
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const nameCheck = validateRealmName(options.realmName);
+    if (!nameCheck.valid) {
+      return { ok: false, error: nameCheck.error || 'Invalid Realm Name.' };
+    }
+    const codeCheck = validateRealmPassword(options.realmCode);
+    if (!codeCheck.valid) {
+      return { ok: false, error: codeCheck.error || 'Invalid Realm Code.' };
+    }
+
+    const cleanName = nameCheck.cleaned;
+    const cleanPassword = codeCheck.cleaned;
+    const hash = hashRealmSecret(cleanName, cleanPassword);
+
+    // Check if a realm with this exact Realm Name + Realm Code already exists in Firestore
+    if (cloudConfig.enabled && cloudConfig.projectId) {
+      try {
+        const existing = await pullRealmFromCloud(cloudConfig, cleanName, cleanPassword, hash);
+        if (existing) {
+          return {
+            ok: false,
+            error: `Realm "${cleanName}" with that Realm Code already exists! Join it instead or pick a different Realm Name.`,
+          };
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Could not connect to Firestore';
+        return { ok: false, error: `Could not reach CraftForge Cloud: ${msg}` };
+      }
+    }
+
+    const baseRealm = createStarterRealm(cleanName, cleanPassword);
+    const nextPlayers: Record<PlayerId, PlayerProfile> =
+      activePlayerId && currentPlayer ? { [activePlayerId]: currentPlayer } : {};
 
     const nextRealm: RealmState = {
-      realmCode: cleanCode,
+      ...baseRealm,
       players: nextPlayers,
-      items: nextItems,
     };
 
-    setRealm(nextRealm);
-    setRealmCodeInput(cleanCode);
-
-    if (activePlayerId && !nextPlayers[activePlayerId]) {
-      setActivePlayerId(null);
-    }
-
-    let activeCfg = cloudConfig;
-    if (options.cloudConfig && options.cloudConfig.enabled && options.cloudConfig.projectId) {
-      activeCfg = options.cloudConfig;
-      setCloudConfig(activeCfg);
-      saveCloudConfig(activeCfg);
-    }
-
-    if (activeCfg.enabled && activeCfg.projectId) {
-      void pushRealmToCloud(activeCfg, nextRealm)
-        .then(() => {
-          setSyncStatus({
-            state: 'synced',
-            message: `Synced (${cleanCode})`,
-            lastSyncedAt: Date.now(),
-          });
-        })
-        .catch(() => {
-          void syncNow(activeCfg, nextRealm);
+    if (cloudConfig.enabled && cloudConfig.projectId) {
+      try {
+        await pushRealmToCloud(cloudConfig, nextRealm);
+        setSyncStatus({
+          state: 'synced',
+          message: `Synced (${cleanName})`,
+          lastSyncedAt: Date.now(),
         });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Could not save realm to Firestore';
+        setSyncStatus({ state: 'error', message: msg, lastSyncedAt: null });
+        return { ok: false, error: `Could not save realm to CraftForge Cloud: ${msg}` };
+      }
     }
 
-    showToast(`🏰 Created Realm "${cleanCode}"!`);
+    setRealm(nextRealm);
+    showToast(`🏰 Created Realm "${cleanName}"!`);
+    return { ok: true };
   };
 
   const handleAcceptInvite = (invite: RealmInvitePayload) => {
     clearInviteFromUrl();
     setPendingInvite(null);
 
-    const cleanCode = sanitizeRealmCode(invite.realmCode);
-    const nextRealm: RealmState =
-      cleanCode !== realm.realmCode ? createStarterRealm(cleanCode) : realm;
+    const nameCheck = validateRealmName(invite.realmName);
+    const codeCheck = validateRealmPassword(invite.realmCode);
+    if (!nameCheck.valid || !codeCheck.valid) {
+      showToast('⚠ Invite link is invalid or incomplete.');
+      return;
+    }
+
+    const cleanName = nameCheck.cleaned;
+    const cleanPassword = codeCheck.cleaned;
+    const hash = hashRealmSecret(cleanName, cleanPassword);
+
+    const isSame = realm.realmCode === cleanName && realm.realmCodeHash === hash;
+    const nextRealm: RealmState = isSame
+      ? { ...realm, realmPassword: cleanPassword, realmCodeHash: hash }
+      : createStarterRealm(cleanName, cleanPassword);
 
     setRealm(nextRealm);
-    setRealmCodeInput(cleanCode);
     setActivePlayerId(null);
 
-    let activeCfg = cloudConfig;
-    if (invite.projectId) {
-      activeCfg = {
-        enabled: true,
-        projectId: invite.projectId,
-        apiKey: invite.apiKey || '',
-      };
-      setCloudConfig(activeCfg);
-      saveCloudConfig(activeCfg);
+    if (cloudConfig.enabled && cloudConfig.projectId) {
+      void pullRealmFromCloud(cloudConfig, cleanName, cleanPassword, hash)
+        .then((remote) => {
+          if (remote) {
+            setRealm((curr) => mergeRealmStates(curr, remote));
+            setSyncStatus({
+              state: 'synced',
+              message: `Synced (${cleanName})`,
+              lastSyncedAt: Date.now(),
+            });
+          }
+        })
+        .catch(() => {
+          // Will retry on login
+        });
     }
 
-    if (activeCfg.enabled && activeCfg.projectId) {
-      void syncNow(activeCfg, nextRealm);
-    }
-
-    showToast(`⚔ Joined Realm "${cleanCode}"! Log in with your Crafter Name & 3-digit PIN.`);
+    showToast(`⚔ Loaded Realm "${cleanName}"! Enter your Crafter Name & 3-digit PIN to join.`);
   };
 
   const handleDismissInvite = () => {
@@ -646,10 +662,9 @@ export default function App() {
       {showRealmModal && (
         <RealmInviteModal
           initialTab={realmModalTab}
-          currentRealmCode={realm.realmCode}
-          players={Object.values(realm.players)}
+          currentRealmName={realm.realmCode}
+          currentRealmCode={realm.realmPassword}
           inviterName={currentPlayer?.name}
-          cloudConfig={cloudConfig}
           onCreateRealm={handleCreateRealm}
           onClose={() => setShowRealmModal(false)}
         />
@@ -658,139 +673,10 @@ export default function App() {
       {pendingInvite && (
         <JoinRealmModal
           invite={pendingInvite}
-          currentRealmCode={realm.realmCode}
+          currentRealmName={realm.realmCode}
           onAccept={handleAcceptInvite}
           onDismiss={handleDismissInvite}
         />
-      )}
-
-      {showSyncModal && (
-        <div
-          className="cf-modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Cloud Sync Settings"
-          onClick={() => setShowSyncModal(false)}
-        >
-          <div className="mc-panel cf-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="cf-modal-header">
-              <h2 className="cf-modal-title">☁ Realm & Cloud Sync</h2>
-              <button
-                type="button"
-                className="mc-btn mc-btn-red"
-                onClick={() => {
-                  playSound('click');
-                  setShowSyncModal(false);
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <p className="cf-modal-desc">
-              CraftForge works offline right away! To sync live across devices, paste a free
-              Firebase Firestore config (see README.md) and use the same{' '}
-              <strong>Realm Code</strong> on every device.
-            </p>
-
-            <div className="cf-form-group">
-              <label htmlFor="cf-realm-code">Realm Code (Shared Secret)</label>
-              <input
-                id="cf-realm-code"
-                type="text"
-                className="mc-input"
-                value={realmCodeInput}
-                onChange={(e) => setRealmCodeInput(e.target.value)}
-                placeholder="FAMILY-CRAFT"
-              />
-            </div>
-
-            <div className="cf-form-group">
-              <label htmlFor="cf-firebase-snippet">
-                Quick Paste Firebase Config Snippet (Optional)
-              </label>
-              <textarea
-                id="cf-firebase-snippet"
-                className="mc-input"
-                rows={3}
-                value={snippetInput}
-                onChange={(e) => handleSnippetPaste(e.target.value)}
-                placeholder={'Paste { apiKey: "...", projectId: "..." } here to auto-fill'}
-              />
-            </div>
-
-            <div className="cf-form-row">
-              <div className="cf-form-group">
-                <label htmlFor="cf-project-id">Firebase Project ID</label>
-                <input
-                  id="cf-project-id"
-                  type="text"
-                  className="mc-input"
-                  value={projectIdInput}
-                  onChange={(e) => setProjectIdInput(e.target.value)}
-                  placeholder="my-craftforge-123"
-                />
-              </div>
-
-              <div className="cf-form-group">
-                <label htmlFor="cf-api-key">Web API Key (optional)</label>
-                <input
-                  id="cf-api-key"
-                  type="text"
-                  className="mc-input"
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="AIzaSy..."
-                />
-              </div>
-            </div>
-
-            <div className="cf-sync-status-bar">
-              Status: <strong>{syncStatus.message}</strong>
-            </div>
-
-            {syncError && <div className="cf-sync-error">{syncError}</div>}
-
-            <div className="cf-modal-actions">
-              <button
-                type="button"
-                className="mc-btn mc-btn-green"
-                onClick={() => handleSaveCloudSync(true)}
-              >
-                Save & Enable Cloud Sync
-              </button>
-              {cloudConfig.enabled && (
-                <button
-                  type="button"
-                  className="mc-btn mc-btn-gold"
-                  onClick={() => {
-                    playSound('click');
-                    void syncNow();
-                  }}
-                >
-                  ↻ Sync Now
-                </button>
-              )}
-              <button
-                type="button"
-                className="mc-btn"
-                onClick={() => handleSaveCloudSync(false)}
-              >
-                Use Local Only
-              </button>
-              <button
-                type="button"
-                className="mc-btn mc-btn-purple"
-                onClick={() => {
-                  setShowSyncModal(false);
-                  handleOpenRealmModal('invite');
-                }}
-              >
-                ✉ Email Join Invite
-              </button>
-            </div>
-          </div>
-        </div>
       )}
     </>
   );
@@ -799,9 +685,9 @@ export default function App() {
     return (
       <>
         <ProfileGate
-          realmCode={realm.realmCode}
+          realmName={realm.realmCode}
+          realmPassword={realm.realmPassword}
           syncStatus={syncStatus}
-          onOpenSyncModal={handleOpenSyncModal}
           onOpenRealmInvite={handleOpenRealmModal}
           onLogin={handleLogin}
         />
@@ -1084,8 +970,8 @@ export default function App() {
           <button
             type="button"
             className="mc-badge cf-realm-pill"
-            onClick={handleOpenSyncModal}
-            title="Realm & Cloud Sync Settings"
+            onClick={() => handleOpenRealmModal('invite')}
+            title={syncStatus.message}
           >
             <span
               className="cf-sync-dot"
@@ -1118,18 +1004,9 @@ export default function App() {
             type="button"
             className="mc-btn mc-btn-green"
             onClick={() => handleOpenRealmModal('invite')}
-            title="Create a Realm or Email Join Instructions"
+            title="Create a Realm or Email Invite"
           >
-            ✉ Realm &amp; Invite
-          </button>
-
-          <button
-            type="button"
-            className="mc-btn mc-btn-purple"
-            onClick={handleOpenSyncModal}
-            title="Cloud Sync Settings"
-          >
-            ☁ Sync
+            ✉ Share / New Realm
           </button>
 
           <button

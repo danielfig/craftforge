@@ -47,7 +47,9 @@ export interface CraftItem {
 }
 
 export interface RealmState {
-  realmCode: string;
+  realmCode: string; // Realm Name (continuous 3-20 char string, e.g. DRAGONKEEP)
+  realmPassword?: string; // Realm Code (password) stored locally only, never written raw to Firestore
+  realmCodeHash?: string; // Deterministic hash of Realm Name + Realm Code stored in Firestore
   players: Record<PlayerId, PlayerProfile>;
   items: CraftItem[];
 }

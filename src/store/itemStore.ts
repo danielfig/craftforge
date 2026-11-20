@@ -4,6 +4,13 @@ const STORAGE_REALM_KEY = 'craftforge_realm_v1';
 const STORAGE_PLAYER_KEY = 'craftforge_active_player_v1';
 const STORAGE_CLOUD_KEY = 'craftforge_cloud_config_v1';
 
+export const DEFAULT_FIREBASE_PROJECT_ID = 'craftforge-188ce';
+
+export const REALM_NAME_MIN = 3;
+export const REALM_NAME_MAX = 20;
+export const REALM_PASSWORD_MIN = 4;
+export const REALM_PASSWORD_MAX = 24;
+
 export interface CloudSyncConfig {
   enabled: boolean;
   projectId: string;
@@ -204,22 +211,126 @@ export function findPlayerByName(
   return Object.values(players).find((p) => p.name.trim().toLowerCase() === target);
 }
 
-export function createStarterRealm(realmCode = 'FAMILY-CRAFT'): RealmState {
+export function createStarterRealm(
+  realmName = 'FAMILY-CRAFT',
+  realmPassword?: string
+): RealmState {
+  const cleanName = sanitizeRealmName(realmName) || 'FAMILY-CRAFT';
+  const cleanPassword = realmPassword?.trim() || undefined;
+  const realmCodeHash = cleanPassword ? hashRealmSecret(cleanName, cleanPassword) : undefined;
   return {
-    realmCode,
+    realmCode: cleanName,
+    ...(cleanPassword ? { realmPassword: cleanPassword } : {}),
+    ...(realmCodeHash ? { realmCodeHash } : {}),
     players: {},
-    items: createStarterDemoItems(realmCode),
+    items: createStarterDemoItems(cleanName),
   };
 }
 
-export function sanitizeRealmCode(raw: string): string {
-  const cleaned = raw
+export function sanitizeRealmName(raw: string): string {
+  return raw
     .trim()
     .toUpperCase()
-    .replace(/[^A-Z0-9_-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
+    .replace(/\s+/g, '')
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, REALM_NAME_MAX);
+}
+
+export function sanitizeRealmCode(raw: string): string {
+  const cleaned = sanitizeRealmName(raw);
   return cleaned || 'FAMILY-CRAFT';
+}
+
+export function validateRealmName(raw: string): {
+  valid: boolean;
+  cleaned: string;
+  error?: string;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { valid: false, cleaned: '', error: 'Please enter a Realm Name.' };
+  }
+  if (/\s/.test(trimmed)) {
+    return {
+      valid: false,
+      cleaned: sanitizeRealmName(trimmed),
+      error: 'Realm Name must be a single continuous word (no spaces).',
+    };
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+    return {
+      valid: false,
+      cleaned: sanitizeRealmName(trimmed),
+      error: 'Realm Name can only use letters, numbers, hyphens (-), and underscores (_).',
+    };
+  }
+  const upper = trimmed.toUpperCase();
+  if (upper.length < REALM_NAME_MIN || upper.length > REALM_NAME_MAX) {
+    return {
+      valid: false,
+      cleaned: upper.slice(0, REALM_NAME_MAX),
+      error: `Realm Name must be ${REALM_NAME_MIN}–${REALM_NAME_MAX} characters long.`,
+    };
+  }
+  return { valid: true, cleaned: upper };
+}
+
+export function validateRealmPassword(raw: string): {
+  valid: boolean;
+  cleaned: string;
+  error?: string;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { valid: false, cleaned: '', error: 'Please enter a Realm Code (password).' };
+  }
+  if (/\s/.test(trimmed)) {
+    return {
+      valid: false,
+      cleaned: trimmed.replace(/\s+/g, ''),
+      error: 'Realm Code cannot contain spaces.',
+    };
+  }
+  if (trimmed.length < REALM_PASSWORD_MIN || trimmed.length > REALM_PASSWORD_MAX) {
+    return {
+      valid: false,
+      cleaned: trimmed.slice(0, REALM_PASSWORD_MAX),
+      error: `Realm Code must be ${REALM_PASSWORD_MIN}–${REALM_PASSWORD_MAX} characters long.`,
+    };
+  }
+  return { valid: true, cleaned: trimmed };
+}
+
+/**
+ * Deterministic 64-bit hex hash combining Realm Name + Realm Code (password).
+ * Used to derive the unguessable Firestore document ID without storing the raw password.
+ */
+export function hashRealmSecret(realmName: string, realmPassword: string): string {
+  const normalized = `craftforge_realm_v2:${sanitizeRealmName(realmName)}:${realmPassword.trim()}`;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= ch + (i << 1);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  h1 ^= h1 >>> 16;
+  h2 ^= h2 >>> 13;
+  return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+export function getRealmDocId(
+  realmName: string,
+  realmPassword?: string,
+  realmCodeHash?: string
+): string {
+  const cleanName = sanitizeRealmCode(realmName);
+  const hash =
+    realmCodeHash?.trim() ||
+    (realmPassword?.trim() ? hashRealmSecret(cleanName, realmPassword.trim()) : '');
+  return hash ? `${cleanName}__${hash}` : cleanName;
 }
 
 function normalizePlayersMap(
@@ -264,12 +375,28 @@ export function loadRealmState(): RealmState {
     }
     const parsed = JSON.parse(raw) as Partial<RealmState>;
     const realmCode = sanitizeRealmCode(parsed.realmCode || 'FAMILY-CRAFT');
+    const realmPassword =
+      typeof parsed.realmPassword === 'string' && parsed.realmPassword.trim()
+        ? parsed.realmPassword.trim()
+        : undefined;
+    const realmCodeHash =
+      typeof parsed.realmCodeHash === 'string' && parsed.realmCodeHash.trim()
+        ? parsed.realmCodeHash.trim()
+        : realmPassword
+          ? hashRealmSecret(realmCode, realmPassword)
+          : undefined;
     const players = normalizePlayersMap(
       parsed.players as Record<string, Partial<PlayerProfile>> | undefined
     );
     const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
     const items = normalizeStarterDemoItems(rawItems, realmCode);
-    const nextState: RealmState = { realmCode, players, items };
+    const nextState: RealmState = {
+      realmCode,
+      ...(realmPassword ? { realmPassword } : {}),
+      ...(realmCodeHash ? { realmCodeHash } : {}),
+      players,
+      items,
+    };
     saveRealmState(nextState);
     return nextState;
   } catch {
@@ -310,15 +437,18 @@ export function saveActivePlayer(playerId: PlayerId | null): void {
 export function loadCloudConfig(): CloudSyncConfig {
   try {
     const raw = localStorage.getItem(STORAGE_CLOUD_KEY);
-    if (!raw) return { enabled: false, projectId: '', apiKey: '' };
+    if (!raw) {
+      return { enabled: true, projectId: DEFAULT_FIREBASE_PROJECT_ID, apiKey: '' };
+    }
     const parsed = JSON.parse(raw) as Partial<CloudSyncConfig>;
+    const projectId = (parsed.projectId || '').trim() || DEFAULT_FIREBASE_PROJECT_ID;
     return {
-      enabled: Boolean(parsed.enabled && parsed.projectId),
-      projectId: (parsed.projectId || '').trim(),
+      enabled: parsed.enabled !== false,
+      projectId,
       apiKey: (parsed.apiKey || '').trim(),
     };
   } catch {
-    return { enabled: false, projectId: '', apiKey: '' };
+    return { enabled: true, projectId: DEFAULT_FIREBASE_PROJECT_ID, apiKey: '' };
   }
 }
 
@@ -426,27 +556,38 @@ export function mergeRealmStates(local: RealmState, remote: RealmState): RealmSt
     }
   }
 
+  const realmCodeHash = local.realmCodeHash || remote.realmCodeHash;
+
   return {
     realmCode: local.realmCode,
+    ...(local.realmPassword ? { realmPassword: local.realmPassword } : {}),
+    ...(realmCodeHash ? { realmCodeHash } : {}),
     players: normalizePlayersMap(mergedPlayers),
     items: mergedItems,
   };
 }
 
-function getFirestoreDocUrl(config: CloudSyncConfig, realmCode: string): string {
+function getFirestoreDocUrl(
+  config: CloudSyncConfig,
+  realmName: string,
+  realmPassword?: string,
+  realmCodeHash?: string
+): string {
   const safeProject = encodeURIComponent(config.projectId.trim());
-  const safeRealm = encodeURIComponent(sanitizeRealmCode(realmCode));
-  const base = `https://firestore.googleapis.com/v1/projects/${safeProject}/databases/(default)/documents/craftforge_realms/${safeRealm}`;
+  const docId = encodeURIComponent(getRealmDocId(realmName, realmPassword, realmCodeHash));
+  const base = `https://firestore.googleapis.com/v1/projects/${safeProject}/databases/(default)/documents/craftforge_realms/${docId}`;
   return config.apiKey ? `${base}?key=${encodeURIComponent(config.apiKey.trim())}` : base;
 }
 
 export async function pullRealmFromCloud(
   config: CloudSyncConfig,
-  realmCode: string
+  realmName: string,
+  realmPassword?: string,
+  realmCodeHash?: string
 ): Promise<RealmState | null> {
   if (!config.enabled || !config.projectId) return null;
 
-  const url = getFirestoreDocUrl(config, realmCode);
+  const url = getFirestoreDocUrl(config, realmName, realmPassword, realmCodeHash);
   const res = await fetch(url, { method: 'GET' });
 
   if (res.status === 404) {
@@ -476,12 +617,24 @@ export async function pushRealmToCloud(
 ): Promise<void> {
   if (!config.enabled || !config.projectId) return;
 
-  const url = getFirestoreDocUrl(config, state.realmCode);
+  const hash =
+    state.realmCodeHash ||
+    (state.realmPassword ? hashRealmSecret(state.realmCode, state.realmPassword) : undefined);
+
+  // Never store plaintext realmPassword in Firestore
+  const { realmPassword: _omitPassword, ...cloudSafeState } = state;
+  const payloadState: RealmState = {
+    ...cloudSafeState,
+    ...(hash ? { realmCodeHash: hash } : {}),
+  };
+
+  const url = getFirestoreDocUrl(config, state.realmCode, state.realmPassword, hash);
   const body = {
     fields: {
-      realmCode: { stringValue: state.realmCode },
+      realmName: { stringValue: state.realmCode },
+      realmCodeHash: { stringValue: hash || '' },
       updatedAt: { integerValue: String(Date.now()) },
-      payload: { stringValue: JSON.stringify(state) },
+      payload: { stringValue: JSON.stringify(payloadState) },
     },
   };
 
