@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { CraftItem, ItemCategory, ItemRarity, PlayerId, PlayerProfile } from '../types';
+import { CraftItem, ItemCategory, ItemRarity, PlayerProfile } from '../types';
 import { ItemTemplate } from '../assets/templates';
-import { AVATARS, renderPixelsToDataUrl } from '../assets/textures';
+import { renderPixelsToDataUrl } from '../assets/textures';
 import { playSound } from '../utils/sounds';
 import PixelCanvas from './PixelCanvas';
 
@@ -15,12 +15,13 @@ export type NewCraftItemPayload = Omit<
   | 'grade'
   | 'gradeComment'
   | 'gradedAt'
+  | 'votes'
 >;
 
 export interface ItemStudioProps {
   currentPlayer: PlayerProfile;
   otherPlayers: PlayerProfile[];
-  onSendItem: (item: NewCraftItemPayload, recipientId: PlayerId) => void;
+  onSendItem: (item: NewCraftItemPayload) => void;
 }
 
 const CATEGORIES: { id: ItemCategory; icon: string; label: string }[] = [
@@ -120,7 +121,6 @@ function createBlankPixels(): string[] {
 
 export const ItemStudio: React.FC<ItemStudioProps> = ({
   currentPlayer,
-  otherPlayers,
   onSendItem,
 }) => {
   const [pixels, setPixels] = useState<string[]>(() => createBlankPixels());
@@ -129,31 +129,11 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
   const [category, setCategory] = useState<ItemCategory>('weapon');
   const [rarity, setRarity] = useState<ItemRarity>('rare');
   const [enchanted, setEnchanted] = useState<boolean>(false);
-  const [selectedRecipientId, setSelectedRecipientId] = useState<PlayerId>(
-    () => otherPlayers[0]?.id ?? ''
-  );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [sentToast, setSentToast] = useState<{
     itemName: string;
-    recipientName: string;
     previewUrl: string;
   } | null>(null);
-
-  useEffect(() => {
-    if (otherPlayers.length === 0) {
-      if (selectedRecipientId !== '') setSelectedRecipientId('');
-      return;
-    }
-    const stillValid = otherPlayers.some((p) => p.id === selectedRecipientId);
-    if (!stillValid) {
-      setSelectedRecipientId(otherPlayers[0].id);
-    }
-  }, [otherPlayers, selectedRecipientId]);
-
-  const selectedRecipient = useMemo(
-    () => otherPlayers.find((p) => p.id === selectedRecipientId) || otherPlayers[0] || null,
-    [otherPlayers, selectedRecipientId]
-  );
 
   useEffect(() => {
     if (!sentToast) return;
@@ -194,11 +174,6 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
       const trimmedName = name.trim();
       const trimmedDesc = description.trim();
 
-      if (!selectedRecipient) {
-        setErrorMsg('Add another player in the Realm first so you have someone to send to!');
-        playSound('click');
-        return;
-      }
       if (!hasPixels) {
         setErrorMsg('Draw something on the 16×16 canvas (or pick a template) first!');
         playSound('click');
@@ -216,22 +191,18 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
 
       const snapshotUrl = renderPixelsToDataUrl(pixels, 4);
 
-      onSendItem(
-        {
-          name: trimmedName,
-          description: finalDescription,
-          category,
-          rarity,
-          enchanted,
-          pixels: pixels.slice(),
-        },
-        selectedRecipient.id
-      );
+      onSendItem({
+        name: trimmedName,
+        description: finalDescription,
+        category,
+        rarity,
+        enchanted,
+        pixels: pixels.slice(),
+      });
 
       playSound('craft');
       setSentToast({
         itemName: trimmedName,
-        recipientName: selectedRecipient.name,
         previewUrl: snapshotUrl,
       });
 
@@ -254,7 +225,6 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
       onSendItem,
       pixels,
       rarity,
-      selectedRecipient,
     ]
   );
 
@@ -321,11 +291,11 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 800, fontSize: '14px', textShadow: '2px 2px 0 #143310' }}>
-              🎉 ITEM CRAFTED &amp; SENT!
+              🎉 ITEM CRAFTED &amp; SAVED!
             </div>
             <div style={{ fontSize: '13px', color: '#e8ffe4', marginTop: '2px' }}>
-              <strong>{sentToast.itemName}</strong> was sent to{' '}
-              <strong>{sentToast.recipientName}</strong> to rate! Ready to craft another!
+              <strong>{sentToast.itemName}</strong> is saved in the Realm! Other players can vote on
+              it and you can track its stats. Ready to craft another!
             </div>
           </div>
           <button
@@ -541,10 +511,8 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
                     color: '#7f8c9a',
                   }}
                 >
-                  By <strong style={{ color: '#c4e0ff' }}>{currentPlayer.name}</strong> → For{' '}
-                  <strong style={{ color: '#ffdf85' }}>
-                    {selectedRecipient ? selectedRecipient.name : 'Another Player'}
-                  </strong>
+                  By <strong style={{ color: '#c4e0ff' }}>{currentPlayer.name}</strong> •{' '}
+                  <strong style={{ color: '#ffdf85' }}>Open for Realm Voting</strong>
                 </div>
               </div>
             </div>
@@ -766,103 +734,9 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
             </div>
           )}
 
-          {/* Waiting notice when current player is the first/only player in the realm */}
-          {otherPlayers.length === 0 && (
-            <div
-              className="mc-panel-dark"
-              role="status"
-              style={{
-                padding: '10px 12px',
-                border: '2px solid #ffca28',
-                color: '#fff3c4',
-                fontSize: '12px',
-                lineHeight: 1.4,
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-              }}
-            >
-              <span style={{ fontSize: '18px', flexShrink: 0 }}>⏳</span>
-              <span>
-                Waiting for another player to log into this Realm so you can send items!
-              </span>
-            </div>
-          )}
-
-          {/* Recipient Selector (shown when 3+ players are in the realm) */}
-          {otherPlayers.length > 1 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-              <span style={{ fontSize: '11px', fontWeight: 800, color: '#222' }}>
-                📬 SEND TO:
-              </span>
-              <div
-                style={{
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: '6px',
-                }}
-              >
-                {otherPlayers.map((player) => {
-                  const isSelected = selectedRecipient?.id === player.id;
-                  const avatar =
-                    AVATARS.find((a) => a.id === player.avatarId) || AVATARS[0];
-                  return (
-                    <button
-                      key={player.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedRecipientId(player.id);
-                        playSound('click');
-                      }}
-                      className={`mc-btn ${isSelected ? 'mc-btn-gold' : ''}`}
-                      style={{
-                        flex: '1 1 110px',
-                        minHeight: '44px',
-                        padding: '5px 10px',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '7px',
-                        outline: isSelected ? '2px solid #fff' : 'none',
-                      }}
-                      aria-pressed={isSelected}
-                    >
-                      {avatar && (
-                        <img
-                          src={avatar.dataUrl}
-                          alt={player.name}
-                          className="mc-pixelated"
-                          style={{
-                            width: '24px',
-                            height: '24px',
-                            border: `2px solid ${player.color || '#fff'}`,
-                            background: '#222',
-                            flexShrink: 0,
-                          }}
-                        />
-                      )}
-                      <span
-                        style={{
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {player.name}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Big Chunky Green Send Button */}
+          {/* Big Chunky Green Save Button */}
           <button
             type="submit"
-            disabled={!selectedRecipient}
             className="mc-btn mc-btn-green"
             style={{
               width: '100%',
@@ -874,16 +748,11 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
               alignItems: 'center',
               justifyContent: 'center',
               gap: '8px',
-              opacity: selectedRecipient ? 1 : 0.55,
-              cursor: selectedRecipient ? 'pointer' : 'not-allowed',
+              cursor: 'pointer',
             }}
           >
-            <span style={{ fontSize: '19px' }}>🚀</span>
-            <span>
-              {selectedRecipient
-                ? `SEND TO ${selectedRecipient.name.toUpperCase()}!`
-                : 'WAITING FOR ANOTHER PLAYER...'}
-            </span>
+            <span style={{ fontSize: '19px' }}>💾</span>
+            <span>SAVE ITEM TO REALM!</span>
           </button>
         </form>
       </div>

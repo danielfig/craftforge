@@ -1,7 +1,14 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { CraftItem, ItemAuthorId, ItemRarity, PlayerId, PlayerProfile } from '../types';
 import { AVATARS, renderPixelsToDataUrl } from '../assets/textures';
-import { isDemoItem } from '../store/itemStore';
+import {
+  MAX_VOTE_CHANGES,
+  canPlayerChangeVote,
+  formatAverageScore,
+  getItemAverageGrade,
+  getItemVotes,
+  isDemoItem,
+} from '../store/itemStore';
 import { playSound } from '../utils/sounds';
 
 export interface InboxGraderProps {
@@ -10,6 +17,8 @@ export interface InboxGraderProps {
   currentPlayerId: PlayerId;
   onGradeItem: (itemId: string, grade: number, comment: string) => void;
 }
+
+type QueueFilter = 'unvoted' | 'voted' | 'mine' | 'all';
 
 interface GradeRank {
   label: string;
@@ -50,11 +59,16 @@ const QUICK_NOTES = [
 
 const SCORE_OPTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
+function getRankForScore(score: number): GradeRank {
+  const clamped = Math.max(0, Math.min(10, Math.round(score)));
+  return GRADE_RANKS[clamped] || GRADE_RANKS[5];
+}
+
 function getPlayerProfile(
   players: Record<PlayerId, PlayerProfile>,
   id: ItemAuthorId
 ): PlayerProfile | undefined {
-  return id && id !== 'neon' ? players[id] : undefined;
+  return id && id !== 'neon' && id !== 'all' ? players[id] : undefined;
 }
 
 function getAvatarUrl(avatarId: string): string {
@@ -79,82 +93,164 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
   currentPlayerId,
   onGradeItem,
 }) => {
+  const votableItems = useMemo(
+    () =>
+      items
+        .filter((item) => !item.hidden)
+        .sort((a, b) => b.createdAt - a.createdAt),
+    [items]
+  );
+
+  const unvotedItems = useMemo(
+    () =>
+      votableItems.filter(
+        (item) => item.creatorId !== currentPlayerId && !getItemVotes(item)[currentPlayerId]
+      ),
+    [votableItems, currentPlayerId]
+  );
+
+  const votedItems = useMemo(
+    () =>
+      votableItems.filter(
+        (item) => item.creatorId !== currentPlayerId && Boolean(getItemVotes(item)[currentPlayerId])
+      ),
+    [votableItems, currentPlayerId]
+  );
+
+  const myCreatedItems = useMemo(
+    () => votableItems.filter((item) => item.creatorId === currentPlayerId),
+    [votableItems, currentPlayerId]
+  );
+
+  const [queueFilter, setQueueFilter] = useState<QueueFilter>(() =>
+    unvotedItems.length > 0 ? 'unvoted' : 'all'
+  );
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [selectedGrade, setSelectedGrade] = useState<number | null>(null);
   const [comment, setComment] = useState<string>('');
   const benchRef = useRef<HTMLDivElement | null>(null);
 
-  const unratedItems = useMemo(
-    () =>
-      items
-        .filter(
-          (item) =>
-            !isDemoItem(item) &&
-            !item.hidden &&
-            item.recipientId === currentPlayerId &&
-            item.grade === null
-        )
-        .sort((a, b) => b.createdAt - a.createdAt),
-    [items, currentPlayerId]
-  );
-
-  // Auto-select the first unrated item when list changes so Pixel Tablet split-view is immediately active
+  // If user is on 'unvoted' and finishes voting on all items, switch smoothly to 'all'
   useEffect(() => {
-    if (unratedItems.length === 0) {
+    if (queueFilter === 'unvoted' && unvotedItems.length === 0 && votableItems.length > 0) {
+      setQueueFilter('all');
+    }
+  }, [queueFilter, unvotedItems.length, votableItems.length]);
+
+  const filteredItems = useMemo(() => {
+    if (queueFilter === 'unvoted') return unvotedItems;
+    if (queueFilter === 'voted') return votedItems;
+    if (queueFilter === 'mine') return myCreatedItems;
+    return votableItems;
+  }, [queueFilter, unvotedItems, votedItems, myCreatedItems, votableItems]);
+
+  // Auto-select first item in current filtered list
+  useEffect(() => {
+    if (filteredItems.length === 0) {
       setSelectedItemId(null);
       return;
     }
-    const stillExists = unratedItems.some((item) => item.id === selectedItemId);
+    const stillExists = filteredItems.some((item) => item.id === selectedItemId);
     if (!stillExists) {
-      setSelectedItemId(unratedItems[0].id);
+      setSelectedItemId(filteredItems[0].id);
+    }
+  }, [filteredItems, selectedItemId]);
+
+  const selectedItem = useMemo(
+    () => filteredItems.find((item) => item.id === selectedItemId) || filteredItems[0] || null,
+    [filteredItems, selectedItemId]
+  );
+
+  const selectedVotes = useMemo(
+    () => (selectedItem ? getItemVotes(selectedItem) : {}),
+    [selectedItem]
+  );
+  const isSelectedCreator = Boolean(selectedItem && selectedItem.creatorId === currentPlayerId);
+  const myExistingVote = selectedVotes[currentPlayerId];
+  const canVoteOrChange = !isSelectedCreator && canPlayerChangeVote(myExistingVote);
+  const changesRemaining = myExistingVote
+    ? Math.max(0, MAX_VOTE_CHANGES - (myExistingVote.changesUsed ?? 0))
+    : MAX_VOTE_CHANGES;
+
+  // Sync draft score/comment when switching selected item or when current player's saved vote changes
+  useEffect(() => {
+    if (!selectedItem) {
+      setSelectedGrade(null);
+      setComment('');
+      return;
+    }
+    const vote = getItemVotes(selectedItem)[currentPlayerId];
+    if (vote) {
+      setSelectedGrade(vote.score);
+      setComment(vote.comment || '');
+    } else {
       setSelectedGrade(null);
       setComment('');
     }
-  }, [unratedItems, selectedItemId]);
+  }, [
+    selectedItem?.id,
+    currentPlayerId,
+    myExistingVote?.score,
+    myExistingVote?.comment,
+    myExistingVote?.changesUsed,
+  ]);
 
-  const selectedItem = useMemo(
-    () => unratedItems.find((item) => item.id === selectedItemId) || unratedItems[0] || null,
-    [unratedItems, selectedItemId]
-  );
-
-  // Render pixel art data URLs for unrated items
+  // Render pixel art data URLs for all votable items
   const previewUrls = useMemo(() => {
     const map: Record<string, string> = {};
-    for (const item of unratedItems) {
+    for (const item of votableItems) {
       map[item.id] = renderPixelsToDataUrl(item.pixels, 8);
     }
     return map;
-  }, [unratedItems]);
+  }, [votableItems]);
 
-  const otherPlayers = useMemo(
-    () => Object.values(players).filter((p) => p.id !== currentPlayerId),
-    [players, currentPlayerId]
-  );
-  const emptyPartnerLabel =
-    otherPlayers.length === 1 ? otherPlayers[0].name : 'another crafter';
+  const allPlayerList = useMemo(() => Object.values(players), [players]);
 
   const handleSelectItem = (itemId: string) => {
     playSound('chest');
     setSelectedItemId(itemId);
-    setSelectedGrade(null);
-    setComment('');
     if (window.innerWidth < 900 && benchRef.current) {
       benchRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   };
 
   const handlePickScore = (score: number) => {
+    if (!canVoteOrChange) return;
     playSound('grade');
     setSelectedGrade(score);
   };
 
+  const hasChangedFromExisting = useMemo(() => {
+    if (!myExistingVote) return true;
+    const trimmedComment = comment.trim();
+    const existingComment = (myExistingVote.comment || '').trim();
+    return selectedGrade !== myExistingVote.score || trimmedComment !== existingComment;
+  }, [myExistingVote, selectedGrade, comment]);
+
+  const canSubmit =
+    Boolean(selectedItem) &&
+    selectedGrade !== null &&
+    canVoteOrChange &&
+    hasChangedFromExisting;
+
   const handleSubmit = () => {
-    if (!selectedItem || selectedGrade === null) return;
+    if (!selectedItem || selectedGrade === null || !canSubmit) return;
     playSound('xp');
     onGradeItem(selectedItem.id, selectedGrade, comment.trim());
-    setSelectedGrade(null);
-    setComment('');
   };
+
+  const selectedAvgInfo = selectedItem
+    ? getItemAverageGrade(selectedItem)
+    : { average: null, count: 0 };
+
+  const selectedScoreExtremes = useMemo(() => {
+    const scores = Object.values(selectedVotes).map((v) => v.score);
+    if (scores.length === 0) return { high: null as number | null, low: null as number | null };
+    return {
+      high: Math.max(...scores),
+      low: Math.min(...scores),
+    };
+  }, [selectedVotes]);
 
   return (
     <div style={{ width: '100%', maxWidth: '1340px', margin: '0 auto' }}>
@@ -183,7 +279,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
           }
           .cf-inbox-list {
             grid-template-columns: 1fr;
-            max-height: calc(100vh - 210px);
+            max-height: calc(100vh - 260px);
             overflow-y: auto;
             padding-right: 4px;
           }
@@ -199,7 +295,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
         className="mc-panel-dark"
         style={{
           padding: '14px 20px',
-          marginBottom: '16px',
+          marginBottom: '14px',
           display: 'flex',
           flexWrap: 'wrap',
           alignItems: 'center',
@@ -217,7 +313,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
               textShadow: '2px 2px 0 #000',
             }}
           >
-            INBOX TO RATE
+            VOTE &amp; RATE ITEMS
           </h2>
           <p
             style={{
@@ -227,28 +323,29 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
               color: '#d8d8d8',
             }}
           >
-            Pick a glowing chest item and score it from 0 to 10 on the Grading Bench!
+            Vote 0–10 on other players&apos; items (1 vote change allowed), or view live stats on
+            your own creations!
           </p>
         </div>
 
         <div
           className="mc-badge"
           style={{
-            backgroundColor: unratedItems.length > 0 ? '#b8860b' : '#3b8526',
+            backgroundColor: unvotedItems.length > 0 ? '#b8860b' : '#3b8526',
             color: '#ffffff',
             fontFamily: "'Silkscreen', monospace",
             fontSize: '0.85rem',
             padding: '8px 14px',
           }}
         >
-          {unratedItems.length === 0
-            ? 'ALL CAUGHT UP!'
-            : `${unratedItems.length} WAITING FOR GRADE`}
+          {unvotedItems.length === 0
+            ? 'ALL VOTED!'
+            : `${unvotedItems.length} NEED YOUR VOTE`}
         </div>
       </div>
 
-      {/* Empty State */}
-      {unratedItems.length === 0 ? (
+      {/* Empty State when no crafted items exist yet */}
+      {votableItems.length === 0 ? (
         <div
           className="mc-panel"
           style={{
@@ -271,7 +368,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
               fontSize: '2.8rem',
             }}
           >
-            ✨
+            ⚒️
           </div>
           <h3
             style={{
@@ -282,7 +379,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
               lineHeight: 1.5,
             }}
           >
-            All items rated! Go craft a new one!
+            No crafted items yet!
           </h3>
           <p
             style={{
@@ -293,178 +390,311 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
               maxWidth: '500px',
             }}
           >
-            When {emptyPartnerLabel} crafts something new for you, it will
-            appear here as a glowing chest ready for your 0–10 rating.
+            Head to the Item Studio and craft your first item — you can save and vote on it even
+            solo!
           </p>
         </div>
       ) : (
-        /* Pixel Tablet Wide Split View: Left Queue + Right Active 0-10 Grading Bench */
         <div className="cf-inbox-split">
-          {/* LEFT: Unrated Glowing Chest Queue */}
-          <div className="cf-inbox-list">
-            {unratedItems.map((item) => {
-              const creator = getPlayerProfile(players, item.creatorId);
-              const creatorAvatar = creator ? getAvatarUrl(creator.avatarId) : '';
-              const rarityColor = RARITY_COLORS[item.rarity] || '#ffffff';
-              const isActive = selectedItem?.id === item.id;
-
-              return (
+          {/* LEFT: Filter Tabs + Item Queue */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', minWidth: 0 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+              {(
+                [
+                  { id: 'unvoted', label: `Needs Vote (${unvotedItems.length})` },
+                  { id: 'voted', label: `My Votes (${votedItems.length})` },
+                  { id: 'mine', label: `My Items (${myCreatedItems.length})` },
+                  { id: 'all', label: `All (${votableItems.length})` },
+                ] as { id: QueueFilter; label: string }[]
+              ).map((tab) => (
                 <button
-                  key={item.id}
+                  key={tab.id}
                   type="button"
-                  onClick={() => handleSelectItem(item.id)}
-                  className="mc-panel-dark"
+                  className={`mc-btn ${queueFilter === tab.id ? 'mc-btn-gold' : ''}`}
+                  onClick={() => {
+                    playSound('click');
+                    setQueueFilter(tab.id);
+                  }}
                   style={{
-                    padding: '14px',
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '10px',
-                    border: isActive ? '3px solid #ffd700' : '3px solid #7d6218',
-                    boxShadow: isActive
-                      ? '0 0 20px rgba(255, 215, 0, 0.4), inset 0 0 12px rgba(255, 215, 0, 0.16)'
-                      : '0 0 10px rgba(255, 215, 0, 0.14)',
-                    backgroundColor: isActive ? '#2d2619' : undefined,
-                    transition: 'transform 0.1s ease, border-color 0.12s ease',
+                    flex: '1 1 auto',
+                    minHeight: '42px',
+                    padding: '6px 10px',
+                    fontSize: '0.72rem',
                   }}
                 >
-                  {/* Top row: Creator & Time */}
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: '8px',
-                      width: '100%',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      {creatorAvatar && (
-                        <img
-                          src={creatorAvatar}
-                          alt={creator?.name || 'Creator'}
-                          className="mc-pixelated"
-                          style={{
-                            width: '24px',
-                            height: '24px',
-                            imageRendering: 'pixelated',
-                            border: '2px solid #555',
-                          }}
-                        />
-                      )}
-                      <span
-                        style={{
-                          fontFamily: "'Silkscreen', monospace",
-                          fontSize: '0.72rem',
-                          color: '#e6e6e6',
-                        }}
-                      >
-                        From {creator?.name || 'Crafter'}
-                      </span>
-                    </div>
-                    <span
-                      style={{
-                        fontFamily: "'VT323', monospace",
-                        fontSize: '1.05rem',
-                        color: isActive ? '#ffdd55' : '#aaaaaa',
-                      }}
-                    >
-                      {isActive ? '▶ GRADING' : formatTimeAgo(item.createdAt)}
-                    </span>
-                  </div>
+                  {tab.label}
+                </button>
+              ))}
+            </div>
 
-                  {/* Middle: Pixel Art Slot + Title & Description */}
-                  <div style={{ display: 'flex', gap: '12px', alignItems: 'center', width: '100%' }}>
-                    <div
-                      className={`mc-slot ${item.enchanted ? 'mc-enchanted' : ''}`}
+            {filteredItems.length === 0 ? (
+              <div
+                className="mc-panel"
+                style={{
+                  padding: '24px 16px',
+                  textAlign: 'center',
+                  fontFamily: "'VT323', monospace",
+                  fontSize: '1.3rem',
+                  color: '#444',
+                }}
+              >
+                {queueFilter === 'unvoted'
+                  ? 'You voted on every item! Switch to "My Votes" or "All" to view results or change a vote once.'
+                  : 'No items in this view yet.'}
+              </div>
+            ) : (
+              <div className="cf-inbox-list">
+                {filteredItems.map((item) => {
+                  const creator = getPlayerProfile(players, item.creatorId);
+                  const creatorAvatar = creator ? getAvatarUrl(creator.avatarId) : '';
+                  const rarityColor = RARITY_COLORS[item.rarity] || '#ffffff';
+                  const isActive = selectedItem?.id === item.id;
+                  const itemVotes = getItemVotes(item);
+                  const myVote = itemVotes[currentPlayerId];
+                  const avgInfo = getItemAverageGrade(item);
+                  const isLocked = myVote && !canPlayerChangeVote(myVote);
+
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => handleSelectItem(item.id)}
+                      className="mc-panel-dark"
                       style={{
-                        width: '72px',
-                        height: '72px',
-                        flexShrink: 0,
+                        padding: '14px',
+                        cursor: 'pointer',
+                        textAlign: 'left',
                         display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        position: 'relative',
-                        overflow: 'hidden',
+                        flexDirection: 'column',
+                        gap: '10px',
+                        border: isActive
+                          ? '3px solid #ffd700'
+                          : myVote
+                            ? '3px solid #3c6e3c'
+                            : '3px solid #7d6218',
+                        boxShadow: isActive
+                          ? '0 0 20px rgba(255, 215, 0, 0.4), inset 0 0 12px rgba(255, 215, 0, 0.16)'
+                          : '0 0 10px rgba(0, 0, 0, 0.25)',
+                        backgroundColor: isActive ? '#2d2619' : undefined,
+                        transition: 'transform 0.1s ease, border-color 0.12s ease',
                       }}
                     >
-                      <img
-                        src={previewUrls[item.id]}
-                        alt={item.name}
-                        className="mc-pixelated"
-                        style={{
-                          width: '60px',
-                          height: '60px',
-                          imageRendering: 'pixelated',
-                        }}
-                      />
-                    </div>
-
-                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {/* Top row: Creator & Status */}
                       <div
                         style={{
-                          fontFamily: "'Silkscreen', monospace",
-                          fontSize: '0.9rem',
-                          color: rarityColor,
-                          textShadow: '2px 2px 0 #000',
-                          marginBottom: '4px',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '8px',
+                          width: '100%',
                         }}
                       >
-                        {item.name}
-                      </div>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '4px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          {isDemoItem(item) ? (
+                            <>
+                              <span style={{ color: '#4aedf9', fontSize: '1rem', lineHeight: 1 }}>
+                                ✦
+                              </span>
+                              <span
+                                style={{
+                                  fontFamily: "'Silkscreen', monospace",
+                                  fontSize: '0.72rem',
+                                  color: '#4aedf9',
+                                }}
+                              >
+                                By Neon
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              {creatorAvatar && (
+                                <img
+                                  src={creatorAvatar}
+                                  alt={creator?.name || 'Creator'}
+                                  className="mc-pixelated"
+                                  style={{
+                                    width: '24px',
+                                    height: '24px',
+                                    imageRendering: 'pixelated',
+                                    border: '2px solid #555',
+                                  }}
+                                />
+                              )}
+                              <span
+                                style={{
+                                  fontFamily: "'Silkscreen', monospace",
+                                  fontSize: '0.72rem',
+                                  color: '#e6e6e6',
+                                }}
+                              >
+                                {item.creatorId === currentPlayerId
+                                  ? `By ${creator?.name || 'You'} (You)`
+                                  : `By ${creator?.name || 'Crafter'}`}
+                              </span>
+                            </>
+                          )}
+                        </div>
                         <span
-                          className="mc-badge"
                           style={{
-                            fontSize: '0.62rem',
-                            textTransform: 'uppercase',
-                            backgroundColor: '#3a3a4a',
-                            color: '#ddd',
-                            padding: '2px 6px',
+                            fontFamily: "'VT323', monospace",
+                            fontSize: '1.05rem',
+                            color: isActive ? '#ffdd55' : '#aaaaaa',
                           }}
                         >
-                          {item.category}
-                        </span>
-                        <span
-                          className="mc-badge"
-                          style={{
-                            fontSize: '0.62rem',
-                            textTransform: 'uppercase',
-                            backgroundColor: '#262030',
-                            color: rarityColor,
-                            padding: '2px 6px',
-                          }}
-                        >
-                          {item.rarity}
+                          {isActive ? '▶ OPEN' : formatTimeAgo(item.createdAt)}
                         </span>
                       </div>
-                      <p
+
+                      {/* Middle: Pixel Art Slot + Title & Vote Summary */}
+                      <div
                         style={{
-                          margin: 0,
-                          fontFamily: "'VT323', monospace",
-                          fontSize: '1.12rem',
-                          color: '#cccccc',
-                          lineHeight: 1.2,
-                          display: '-webkit-box',
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: 'vertical',
-                          overflow: 'hidden',
+                          display: 'flex',
+                          gap: '12px',
+                          alignItems: 'center',
+                          width: '100%',
                         }}
                       >
-                        {item.description || 'A mysterious crafted item!'}
-                      </p>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
+                        <div
+                          className={`mc-slot ${item.enchanted ? 'mc-enchanted' : ''}`}
+                          style={{
+                            width: '72px',
+                            height: '72px',
+                            flexShrink: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            position: 'relative',
+                            overflow: 'hidden',
+                          }}
+                        >
+                          <img
+                            src={previewUrls[item.id]}
+                            alt={item.name}
+                            className="mc-pixelated"
+                            style={{
+                              width: '60px',
+                              height: '60px',
+                              imageRendering: 'pixelated',
+                            }}
+                          />
+                        </div>
+
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div
+                            style={{
+                              fontFamily: "'Silkscreen', monospace",
+                              fontSize: '0.9rem',
+                              color: rarityColor,
+                              textShadow: '2px 2px 0 #000',
+                              marginBottom: '4px',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            {item.name}
+                          </div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: '4px',
+                              marginBottom: '4px',
+                            }}
+                          >
+                            {avgInfo.average !== null ? (
+                              <span
+                                className="mc-badge"
+                                style={{
+                                  fontSize: '0.62rem',
+                                  backgroundColor: '#1f3b4d',
+                                  color: '#55ffff',
+                                  border: '1px solid #55ffff',
+                                  padding: '2px 6px',
+                                }}
+                              >
+                                AVG {formatAverageScore(avgInfo.average)}/10 ({avgInfo.count})
+                              </span>
+                            ) : (
+                              <span
+                                className="mc-badge"
+                                style={{
+                                  fontSize: '0.62rem',
+                                  backgroundColor: '#3a3a4a',
+                                  color: '#ccc',
+                                  padding: '2px 6px',
+                                }}
+                              >
+                                NO VOTES YET
+                              </span>
+                            )}
+
+                            {item.creatorId === currentPlayerId ? (
+                              <span
+                                className="mc-badge"
+                                style={{
+                                  fontSize: '0.62rem',
+                                  backgroundColor: '#22384f',
+                                  color: '#7cd4ff',
+                                  border: '1px solid #55b4ff',
+                                  padding: '2px 6px',
+                                }}
+                              >
+                                📊 YOUR ITEM
+                              </span>
+                            ) : myVote ? (
+                              <span
+                                className="mc-badge"
+                                style={{
+                                  fontSize: '0.62rem',
+                                  backgroundColor: isLocked ? '#3d2240' : '#18471e',
+                                  color: isLocked ? '#e6a8ff' : '#80ff80',
+                                  border: `1px solid ${isLocked ? '#b866d6' : '#55ff55'}`,
+                                  padding: '2px 6px',
+                                }}
+                              >
+                                {isLocked ? '🔒 ' : '✓ '}YOU: {myVote.score}/10
+                              </span>
+                            ) : (
+                              <span
+                                className="mc-badge"
+                                style={{
+                                  fontSize: '0.62rem',
+                                  backgroundColor: '#5c4a12',
+                                  color: '#ffdd55',
+                                  border: '1px solid #d4a017',
+                                  padding: '2px 6px',
+                                }}
+                              >
+                                VOTE NOW
+                              </span>
+                            )}
+                          </div>
+                          <p
+                            style={{
+                              margin: 0,
+                              fontFamily: "'VT323', monospace",
+                              fontSize: '1.1rem',
+                              color: '#cccccc',
+                              lineHeight: 1.2,
+                              display: '-webkit-box',
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: 'vertical',
+                              overflow: 'hidden',
+                            }}
+                          >
+                            {item.description || 'A mysterious crafted item!'}
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {/* RIGHT: Spacious Active 0-10 Grading Bench */}
+          {/* RIGHT: Spacious Active 0-10 Voting Bench + All Votes Breakdown */}
           {selectedItem && (
             <div
               ref={benchRef}
@@ -497,7 +727,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                     color: '#2b2b2b',
                   }}
                 >
-                  0–10 GRADING BENCH
+                  {isSelectedCreator ? '📊 YOUR ITEM STATS' : '0–10 VOTING BENCH'}
                 </h3>
                 <span
                   style={{
@@ -598,6 +828,16 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                     }}
                   >
                     {(() => {
+                      if (isDemoItem(selectedItem)) {
+                        return (
+                          <>
+                            <span style={{ color: '#4aedf9', fontSize: '1.1rem', lineHeight: 1 }}>
+                              ✦
+                            </span>
+                            <span style={{ color: '#4aedf9' }}>Crafted by Neon</span>
+                          </>
+                        );
+                      }
                       const selectedCreator = getPlayerProfile(players, selectedItem.creatorId);
                       return (
                         <>
@@ -609,7 +849,10 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                               style={{ width: '24px', height: '24px', imageRendering: 'pixelated' }}
                             />
                           )}
-                          <span>Crafted by {selectedCreator?.name || 'Crafter'}</span>
+                          <span>
+                            Crafted by {selectedCreator?.name || 'Crafter'}
+                            {selectedItem.creatorId === currentPlayerId ? ' (You)' : ''}
+                          </span>
                         </>
                       );
                     })()}
@@ -617,8 +860,232 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                 </div>
               </div>
 
+              {isSelectedCreator ? (
+                /* Creator Stats Dashboard (creators cannot vote on their own items) */
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div
+                    className="mc-panel-dark"
+                    style={{
+                      padding: '10px 14px',
+                      border: '2px solid #55b4ff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: '8px',
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: "'Silkscreen', monospace",
+                        fontSize: '0.78rem',
+                        color: '#9ad8ff',
+                      }}
+                    >
+                      ✨ YOU CRAFTED THIS ITEM — VIEWING LIVE VOTES &amp; STATS
+                    </span>
+                    <span
+                      style={{
+                        fontFamily: "'VT323', monospace",
+                        fontSize: '1.15rem',
+                        color: '#cccccc',
+                      }}
+                    >
+                      Creators can&apos;t vote on their own items
+                    </span>
+                  </div>
+
+                  {/* Stats Summary Cards */}
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                      gap: '10px',
+                    }}
+                  >
+                    <div
+                      className="mc-panel-dark"
+                      style={{
+                        padding: '12px',
+                        textAlign: 'center',
+                        border:
+                          selectedAvgInfo.average !== null
+                            ? `2px solid ${getRankForScore(selectedAvgInfo.average).color}`
+                            : '2px solid #444',
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontFamily: "'Silkscreen', monospace",
+                          fontSize: '0.68rem',
+                          color: '#bbbbbb',
+                          marginBottom: '6px',
+                        }}
+                      >
+                        AVERAGE SCORE
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "'Press Start 2P', monospace",
+                          fontSize: '1.2rem',
+                          color:
+                            selectedAvgInfo.average !== null
+                              ? getRankForScore(selectedAvgInfo.average).color
+                              : '#888888',
+                        }}
+                      >
+                        {selectedAvgInfo.average !== null
+                          ? `${formatAverageScore(selectedAvgInfo.average)}/10`
+                          : '—'}
+                      </div>
+                      {selectedAvgInfo.average !== null && (
+                        <div
+                          style={{
+                            fontFamily: "'VT323', monospace",
+                            fontSize: '1.15rem',
+                            color: '#e0e0e0',
+                            marginTop: '4px',
+                          }}
+                        >
+                          {getRankForScore(selectedAvgInfo.average).emoji}{' '}
+                          {getRankForScore(selectedAvgInfo.average).label}
+                        </div>
+                      )}
+                    </div>
+
+                    <div
+                      className="mc-panel-dark"
+                      style={{
+                        padding: '12px',
+                        textAlign: 'center',
+                        border: '2px solid #444',
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontFamily: "'Silkscreen', monospace",
+                          fontSize: '0.68rem',
+                          color: '#bbbbbb',
+                          marginBottom: '6px',
+                        }}
+                      >
+                        VOTES RECEIVED
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "'Press Start 2P', monospace",
+                          fontSize: '1.2rem',
+                          color: '#55ff55',
+                        }}
+                      >
+                        {selectedAvgInfo.count}
+                        <span style={{ fontSize: '0.78rem', color: '#aaaaaa' }}>
+                          /
+                          {Math.max(
+                            selectedAvgInfo.count,
+                            allPlayerList.filter((p) => p.id !== selectedItem.creatorId).length
+                          )}
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "'VT323', monospace",
+                          fontSize: '1.1rem',
+                          color: '#cccccc',
+                          marginTop: '4px',
+                        }}
+                      >
+                        {allPlayerList.filter((p) => p.id !== selectedItem.creatorId).length === 0
+                          ? 'Invite friends to vote!'
+                          : 'Eligible voters'}
+                      </div>
+                    </div>
+
+                    <div
+                      className="mc-panel-dark"
+                      style={{
+                        padding: '12px',
+                        textAlign: 'center',
+                        border: '2px solid #444',
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontFamily: "'Silkscreen', monospace",
+                          fontSize: '0.68rem',
+                          color: '#bbbbbb',
+                          marginBottom: '6px',
+                        }}
+                      >
+                        HIGH / LOW
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "'Press Start 2P', monospace",
+                          fontSize: '1.15rem',
+                          color: '#ffdd55',
+                        }}
+                      >
+                        {selectedScoreExtremes.high !== null
+                          ? `${selectedScoreExtremes.high} / ${selectedScoreExtremes.low}`
+                          : '—'}
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "'VT323', monospace",
+                          fontSize: '1.1rem',
+                          color: '#cccccc',
+                          marginTop: '4px',
+                        }}
+                      >
+                        {selectedScoreExtremes.high !== null ? 'Score range' : 'No scores yet'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* Player Vote Status Banner (when already voted) */}
+                  {myExistingVote && (
+                <div
+                  className="mc-panel-dark"
+                  style={{
+                    padding: '10px 14px',
+                    border: canVoteOrChange ? '2px solid #55ff55' : '2px solid #d580ff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '8px',
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: "'Silkscreen', monospace",
+                      fontSize: '0.78rem',
+                      color: canVoteOrChange ? '#b8ffb8' : '#e6c2ff',
+                    }}
+                  >
+                    {canVoteOrChange
+                      ? `✓ YOU VOTED ${myExistingVote.score}/10 — YOU CAN CHANGE YOUR VOTE ONCE`
+                      : myExistingVote.history && myExistingVote.history.length > 0
+                        ? `🔒 VOTE LOCKED AT ${myExistingVote.score}/10 (CHANGED FROM ${myExistingVote.history[myExistingVote.history.length - 1].score}/10)`
+                        : `🔒 VOTE LOCKED AT ${myExistingVote.score}/10 (1 CHANGE USED)`}
+                  </span>
+                  <span
+                    style={{
+                      fontFamily: "'VT323', monospace",
+                      fontSize: '1.15rem',
+                      color: '#cccccc',
+                    }}
+                  >
+                    {changesRemaining > 0 ? '1 change left' : 'No changes left'}
+                  </span>
+                </div>
+              )}
+
               {/* 0 to 10 Hotbar / XP Score Picker */}
-              <div>
+              <div style={{ opacity: canVoteOrChange ? 1 : 0.65 }}>
                 <div
                   style={{
                     display: 'flex',
@@ -636,7 +1103,11 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                       color: '#2b2b2b',
                     }}
                   >
-                    TAP YOUR SCORE (0–10):
+                    {myExistingVote
+                      ? canVoteOrChange
+                        ? 'CHANGE YOUR SCORE (0–10):'
+                        : 'YOUR FINAL SCORE (LOCKED):'
+                      : 'TAP YOUR SCORE (0–10):'}
                   </span>
 
                   {selectedGrade !== null ? (
@@ -683,12 +1154,13 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                       <button
                         key={score}
                         type="button"
+                        disabled={!canVoteOrChange}
                         onClick={() => handlePickScore(score)}
                         aria-pressed={isSelected}
                         style={{
                           minHeight: '54px',
                           minWidth: '44px',
-                          cursor: 'pointer',
+                          cursor: canVoteOrChange ? 'pointer' : 'not-allowed',
                           fontFamily: "'Press Start 2P', monospace",
                           fontSize: score === 10 ? '0.82rem' : '0.98rem',
                           color: isSelected ? '#ffffff' : '#e0e0e0',
@@ -737,7 +1209,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
               </div>
 
               {/* Optional Note + Quick-Tap Tablet Chips */}
-              <div>
+              <div style={{ opacity: canVoteOrChange ? 1 : 0.65 }}>
                 <label
                   htmlFor="grade-comment-input"
                   style={{
@@ -748,12 +1220,13 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                     marginBottom: '6px',
                   }}
                 >
-                  GRADING NOTE (OPTIONAL):
+                  VOTE NOTE (OPTIONAL):
                 </label>
                 <input
                   id="grade-comment-input"
                   type="text"
                   className="mc-input"
+                  disabled={!canVoteOrChange}
                   value={comment}
                   maxLength={120}
                   placeholder="Super cool power!"
@@ -765,54 +1238,332 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                     fontSize: '1.18rem',
                   }}
                 />
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '6px',
-                    marginTop: '8px',
-                  }}
-                >
-                  {QUICK_NOTES.map((note) => (
-                    <button
-                      key={note}
-                      type="button"
-                      className="mc-btn"
-                      onClick={() => {
-                        playSound('click');
-                        setComment(note);
-                      }}
-                      style={{
-                        fontSize: '0.74rem',
-                        padding: '6px 10px',
-                        minHeight: '38px',
-                      }}
-                    >
-                      {note}
-                    </button>
-                  ))}
-                </div>
+                {canVoteOrChange && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '6px',
+                      marginTop: '8px',
+                    }}
+                  >
+                    {QUICK_NOTES.map((note) => (
+                      <button
+                        key={note}
+                        type="button"
+                        className="mc-btn"
+                        onClick={() => {
+                          playSound('click');
+                          setComment(note);
+                        }}
+                        style={{
+                          fontSize: '0.74rem',
+                          padding: '6px 10px',
+                          minHeight: '38px',
+                        }}
+                      >
+                        {note}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
-              {/* Chunky Submit Grade Button */}
+              {/* Chunky Submit / Change Vote Button */}
               <button
                 type="button"
-                className="mc-btn mc-btn-green"
-                disabled={selectedGrade === null}
+                className={`mc-btn ${myExistingVote ? 'mc-btn-gold' : 'mc-btn-green'}`}
+                disabled={!canSubmit}
                 onClick={handleSubmit}
                 style={{
                   width: '100%',
                   minHeight: '58px',
                   fontFamily: "'Press Start 2P', monospace",
-                  fontSize: '0.95rem',
-                  opacity: selectedGrade === null ? 0.55 : 1,
-                  cursor: selectedGrade === null ? 'not-allowed' : 'pointer',
+                  fontSize: '0.88rem',
+                  opacity: canSubmit ? 1 : 0.55,
+                  cursor: canSubmit ? 'pointer' : 'not-allowed',
                 }}
               >
-                {selectedGrade === null
-                  ? 'PICK A SCORE (0–10) FIRST'
-                  : `SUBMIT GRADE (${selectedGrade}/10)`}
+                {!canVoteOrChange
+                  ? `🔒 VOTE LOCKED (${myExistingVote?.score}/10)`
+                  : selectedGrade === null
+                    ? 'PICK A SCORE (0–10) FIRST'
+                    : myExistingVote
+                      ? hasChangedFromExisting
+                        ? `CHANGE VOTE TO ${selectedGrade}/10 (USES 1 CHANGE)`
+                        : 'PICK A NEW SCORE OR NOTE TO CHANGE'
+                      : `SUBMIT VOTE (${selectedGrade}/10)`}
               </button>
+                </>
+              )}
+
+              {/* All Player Votes & Average Breakdown */}
+              <div
+                className="mc-panel-dark"
+                style={{
+                  padding: '14px 16px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '8px',
+                    paddingBottom: '8px',
+                    borderBottom: '2px solid rgba(255,255,255,0.12)',
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: "'Silkscreen', monospace",
+                      fontSize: '0.8rem',
+                      color: '#ffdd55',
+                    }}
+                  >
+                    📊 PLAYER VOTES ({selectedAvgInfo.count})
+                  </span>
+                  {selectedAvgInfo.average !== null ? (
+                    <span
+                      className="mc-badge"
+                      style={{
+                        backgroundColor: getRankForScore(selectedAvgInfo.average).bg,
+                        color: getRankForScore(selectedAvgInfo.average).color,
+                        border: `2px solid ${getRankForScore(selectedAvgInfo.average).color}`,
+                        fontFamily: "'Press Start 2P', monospace",
+                        fontSize: '0.74rem',
+                        padding: '5px 10px',
+                      }}
+                    >
+                      AVG {formatAverageScore(selectedAvgInfo.average)}/10
+                    </span>
+                  ) : (
+                    <span
+                      style={{
+                        fontFamily: "'VT323', monospace",
+                        fontSize: '1.15rem',
+                        color: '#aaaaaa',
+                      }}
+                    >
+                      No votes yet — be the first!
+                    </span>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {(() => {
+                    const eligiblePlayers = allPlayerList.filter(
+                      (p) => p.id !== selectedItem.creatorId || Boolean(selectedVotes[p.id])
+                    );
+                    const knownIds = new Set(eligiblePlayers.map((p) => p.id));
+                    const extraVoterIds = Object.keys(selectedVotes).filter(
+                      (id) => !knownIds.has(id)
+                    );
+                    const rows = [
+                      ...eligiblePlayers.map((p) => ({
+                        id: p.id,
+                        name: p.name,
+                        avatarId: p.avatarId,
+                        color: p.color,
+                      })),
+                      ...extraVoterIds.map((id) => ({
+                        id,
+                        name: 'Crafter',
+                        avatarId: 'knight',
+                        color: '#cccccc',
+                      })),
+                    ];
+
+                    if (rows.length === 0) {
+                      return (
+                        <div
+                          style={{
+                            padding: '10px',
+                            textAlign: 'center',
+                            fontFamily: "'VT323', monospace",
+                            fontSize: '1.2rem',
+                            color: '#bbbbbb',
+                          }}
+                        >
+                          No other players in this Realm yet — share your Realm invite so friends
+                          can vote and leave comments!
+                        </div>
+                      );
+                    }
+
+                    return rows.map((p) => {
+                      const v = selectedVotes[p.id];
+                      const rank = v ? getRankForScore(v.score) : null;
+                      const prevHistory = v?.history && v.history.length > 0 ? v.history : null;
+                      const lastPrev = prevHistory ? prevHistory[prevHistory.length - 1] : null;
+                      return (
+                        <div
+                          key={p.id}
+                          style={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '8px',
+                            padding: '8px 10px',
+                            backgroundColor: 'rgba(0,0,0,0.28)',
+                            border: `2px solid ${p.id === currentPlayerId ? '#55ff55' : '#3a3a3a'}`,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: '10px',
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                              <img
+                                src={getAvatarUrl(p.avatarId)}
+                                alt={p.name}
+                                className="mc-pixelated"
+                                style={{ width: '26px', height: '26px', imageRendering: 'pixelated' }}
+                              />
+                              <div style={{ minWidth: 0 }}>
+                                <div
+                                  style={{
+                                    fontFamily: "'Silkscreen', monospace",
+                                    fontSize: '0.74rem',
+                                    color: p.color || '#ffffff',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    flexWrap: 'wrap',
+                                  }}
+                                >
+                                  <span>
+                                    {p.name}
+                                    {p.id === currentPlayerId ? ' (You)' : ''}
+                                  </span>
+                                  {v && v.changesUsed > 0 && (
+                                    <span
+                                      className="mc-badge"
+                                      style={{
+                                        fontSize: '0.56rem',
+                                        padding: '2px 5px',
+                                        backgroundColor: '#3a2248',
+                                        color: '#e2b8ff',
+                                        border: '1px solid #b866d6',
+                                      }}
+                                    >
+                                      CHANGED
+                                    </span>
+                                  )}
+                                </div>
+                                {v?.comment && (
+                                  <div
+                                    style={{
+                                      fontFamily: "'VT323', monospace",
+                                      fontSize: '1.18rem',
+                                      color: '#d8ffd8',
+                                      lineHeight: 1.15,
+                                    }}
+                                  >
+                                    “{v.comment}”
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              {v && rank ? (
+                                <>
+                                  {lastPrev && (
+                                    <span
+                                      style={{
+                                        fontFamily: "'VT323', monospace",
+                                        fontSize: '1.15rem',
+                                        color: '#b5a2cc',
+                                      }}
+                                      title={`Changed from ${lastPrev.score}/10 to ${v.score}/10`}
+                                    >
+                                      <span style={{ textDecoration: 'line-through' }}>
+                                        {lastPrev.score}/10
+                                      </span>{' '}
+                                      →
+                                    </span>
+                                  )}
+                                  <span
+                                    className="mc-badge"
+                                    style={{
+                                      backgroundColor: rank.bg,
+                                      color: rank.color,
+                                      border: `2px solid ${rank.color}`,
+                                      fontFamily: "'Press Start 2P', monospace",
+                                      fontSize: '0.72rem',
+                                      padding: '4px 8px',
+                                    }}
+                                  >
+                                    {v.score}/10
+                                  </span>
+                                </>
+                              ) : (
+                                <span
+                                  style={{
+                                    fontFamily: "'VT323', monospace",
+                                    fontSize: '1.12rem',
+                                    color: '#888888',
+                                  }}
+                                >
+                                  Not voted yet
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Preserved Previous Vote & Comment History */}
+                          {prevHistory && (
+                            <div
+                              style={{
+                                marginLeft: '34px',
+                                padding: '6px 10px',
+                                backgroundColor: 'rgba(184, 102, 214, 0.1)',
+                                borderLeft: '3px solid #b866d6',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '4px',
+                              }}
+                            >
+                              {prevHistory.map((h, idx) => (
+                                <div
+                                  key={`${p.id}-hist-${idx}`}
+                                  style={{
+                                    fontFamily: "'VT323', monospace",
+                                    fontSize: '1.08rem',
+                                    color: '#c9bdd6',
+                                    lineHeight: 1.2,
+                                  }}
+                                >
+                                  <span style={{ color: '#e2b8ff', fontWeight: 700 }}>
+                                    Previous vote:
+                                  </span>{' '}
+                                  <span style={{ textDecoration: 'line-through' }}>
+                                    {h.score}/10
+                                  </span>
+                                  {h.comment ? (
+                                    <span style={{ color: '#d8d0e4' }}> — “{h.comment}”</span>
+                                  ) : (
+                                    <span style={{ color: '#998fa8' }}> (no comment)</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              </div>
             </div>
           )}
         </div>

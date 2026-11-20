@@ -1,5 +1,20 @@
 export type PlayerId = string;
-export type ItemAuthorId = PlayerId | 'neon';
+export type ItemAuthorId = PlayerId | 'neon' | 'all';
+
+export interface ItemVoteSnapshot {
+  score: number; // 0..10 integer
+  comment?: string;
+  votedAt: number;
+}
+
+export interface ItemVote {
+  playerId: PlayerId;
+  score: number; // 0..10 integer (current active vote)
+  comment?: string;
+  votedAt: number;
+  changesUsed: number; // 0 on initial vote, 1 after changing vote once (max 1)
+  history?: ItemVoteSnapshot[]; // Previous votes/comments preserved when changed
+}
 
 export interface PlayerProfile {
   id: PlayerId;
@@ -38,9 +53,10 @@ export interface CraftItem {
   creatorId: ItemAuthorId;
   recipientId: ItemAuthorId;
   createdAt: number;
-  grade: number | null; // 0..10 integer, null if unrated
+  grade: number | null; // Legacy/summary average score (0..10), null if unrated
   gradeComment?: string;
   gradedAt?: number;
+  votes?: Record<PlayerId, ItemVote>; // Per-player votes (0..10)
   hidden?: boolean;
   hiddenUpdatedAt?: number;
   isDemo?: boolean;

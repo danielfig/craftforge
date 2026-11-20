@@ -585,19 +585,19 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
         <div
           style={{
             display: 'flex',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            justifyContent: 'space-between',
+            flexDirection: 'column',
+            alignItems: 'stretch',
             gap: '10px',
             paddingTop: '10px',
             borderTop: '2px solid rgba(255,255,255,0.12)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minHeight: '24px' }}>
             <span
               style={{
                 width: '10px',
                 height: '10px',
+                flexShrink: 0,
                 backgroundColor: syncDotColor,
                 display: 'inline-block',
                 border: '1px solid #000',
@@ -607,6 +607,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
               style={{
                 fontFamily: "'VT323', monospace",
                 fontSize: '1.18rem',
+                lineHeight: 1.2,
                 color: '#dcdcdc',
               }}
             >

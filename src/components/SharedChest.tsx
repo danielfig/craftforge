@@ -1,7 +1,14 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { CraftItem, ItemAuthorId, ItemRarity, PlayerId, PlayerProfile } from '../types';
 import { AVATARS, renderPixelsToDataUrl } from '../assets/textures';
-import { isDemoItem } from '../store/itemStore';
+import {
+  MAX_VOTE_CHANGES,
+  canPlayerChangeVote,
+  formatAverageScore,
+  getItemAverageGrade,
+  getItemVotes,
+  isDemoItem,
+} from '../store/itemStore';
 import { playSound } from '../utils/sounds';
 
 export interface SharedChestProps {
@@ -9,10 +16,13 @@ export interface SharedChestProps {
   players: Record<PlayerId, PlayerProfile>;
   currentPlayerId: PlayerId;
   onToggleHideItem?: (itemId: string) => void;
+  onVoteItem?: (itemId: string, score: number, comment: string) => void;
 }
 
-type FilterMode = 'all' | 'graded' | 'pending' | 'hidden' | `player:${PlayerId}`;
+type FilterMode = 'all' | 'graded' | 'pending' | 'needs_vote' | 'hidden' | `player:${PlayerId}`;
 type SortMode = 'newest' | 'highest';
+
+const SCORE_OPTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 const PLAYER_STAT_COLORS = ['#ffd700', '#55ffff', '#ff77ff', '#55ff55', '#ffaa00', '#ff6666'];
 
@@ -50,7 +60,7 @@ function getPlayerProfile(
   players: Record<PlayerId, PlayerProfile>,
   id: ItemAuthorId
 ): PlayerProfile | undefined {
-  return id && id !== 'neon' ? players[id] : undefined;
+  return id && id !== 'neon' && id !== 'all' ? players[id] : undefined;
 }
 
 function getAvatarUrl(avatarId: string): string {
@@ -76,10 +86,14 @@ export const SharedChest: React.FC<SharedChestProps> = ({
   players,
   currentPlayerId,
   onToggleHideItem,
+  onVoteItem,
 }) => {
   const [filter, setFilter] = useState<FilterMode>('all');
   const [sort, setSort] = useState<SortMode>('newest');
   const [inspectItemId, setInspectItemId] = useState<string | null>(null);
+  const [modalScore, setModalScore] = useState<number | null>(null);
+  const [modalComment, setModalComment] = useState<string>('');
+  const [showVoteEditor, setShowVoteEditor] = useState<boolean>(false);
 
   const playerList = useMemo(() => Object.values(players), [players]);
 
@@ -108,7 +122,7 @@ export const SharedChest: React.FC<SharedChestProps> = ({
   // Compute top stats (excluding hidden and starter demo items) dynamically for all players
   const stats = useMemo(() => {
     const totalCrafted = nonDemoItems.length;
-    const gradedItems = nonDemoItems.filter((i) => i.grade !== null);
+    const gradedItems = nonDemoItems.filter((i) => getItemAverageGrade(i).average !== null);
     const gradedCount = gradedItems.length;
 
     const avgByPlayer: Record<PlayerId, string> = {};
@@ -117,7 +131,7 @@ export const SharedChest: React.FC<SharedChestProps> = ({
       if (pGraded.length === 0) {
         avgByPlayer[p.id] = '—';
       } else {
-        const sum = pGraded.reduce((acc, i) => acc + (i.grade ?? 0), 0);
+        const sum = pGraded.reduce((acc, i) => acc + (getItemAverageGrade(i).average ?? 0), 0);
         avgByPlayer[p.id] = (sum / pGraded.length).toFixed(1);
       }
     }
@@ -129,15 +143,19 @@ export const SharedChest: React.FC<SharedChestProps> = ({
     };
   }, [nonDemoItems, playerList]);
 
-  // Filter & sort items (starter demo items appear only in 'all')
+  // Filter & sort items (including Neon items in vote filters)
   const visibleItems = useMemo(() => {
     let list = nonHiddenItems;
     if (filter === 'hidden') {
       list = myHiddenItems;
     } else if (filter === 'graded') {
-      list = nonDemoItems.filter((i) => i.grade !== null);
+      list = nonHiddenItems.filter((i) => getItemAverageGrade(i).average !== null);
     } else if (filter === 'pending') {
-      list = nonDemoItems.filter((i) => i.grade === null);
+      list = nonHiddenItems.filter((i) => getItemAverageGrade(i).average === null);
+    } else if (filter === 'needs_vote') {
+      list = nonHiddenItems.filter(
+        (i) => i.creatorId !== currentPlayerId && !getItemVotes(i)[currentPlayerId]
+      );
     } else if (filter.startsWith('player:')) {
       const targetId = filter.slice('player:'.length);
       list = nonDemoItems.filter((i) => i.creatorId === targetId);
@@ -145,13 +163,13 @@ export const SharedChest: React.FC<SharedChestProps> = ({
 
     return [...list].sort((a, b) => {
       if (sort === 'highest') {
-        const ga = a.grade ?? -1;
-        const gb = b.grade ?? -1;
+        const ga = getItemAverageGrade(a).average ?? -1;
+        const gb = getItemAverageGrade(b).average ?? -1;
         if (gb !== ga) return gb - ga;
       }
       return b.createdAt - a.createdAt;
     });
-  }, [nonHiddenItems, nonDemoItems, myHiddenItems, filter, sort]);
+  }, [nonHiddenItems, nonDemoItems, myHiddenItems, filter, sort, currentPlayerId]);
 
   // Render crisp pixel art URLs once per items change
   const pixelUrls = useMemo(() => {
@@ -190,6 +208,17 @@ export const SharedChest: React.FC<SharedChestProps> = ({
   const handleOpenInspect = (itemId: string) => {
     playSound('chest');
     setInspectItemId(itemId);
+    const target = items.find((i) => i.id === itemId);
+    const existingVote = target ? getItemVotes(target)[currentPlayerId] : undefined;
+    if (existingVote) {
+      setModalScore(existingVote.score);
+      setModalComment(existingVote.comment || '');
+      setShowVoteEditor(false);
+    } else {
+      setModalScore(null);
+      setModalComment('');
+      setShowVoteEditor(true);
+    }
   };
 
   return (
@@ -357,8 +386,9 @@ export const SharedChest: React.FC<SharedChestProps> = ({
           {(
             [
               { id: 'all', label: 'All' },
-              { id: 'graded', label: 'Graded' },
-              { id: 'pending', label: 'Waiting for Grade' },
+              { id: 'graded', label: 'Voted' },
+              { id: 'pending', label: 'No Votes Yet' },
+              { id: 'needs_vote', label: 'Needs My Vote' },
               ...playerList.map((p) => ({
                 id: `player:${p.id}` as FilterMode,
                 label: `By ${p.name}`,
@@ -469,8 +499,10 @@ export const SharedChest: React.FC<SharedChestProps> = ({
               const demo = isDemoItem(item);
               const creator = demo ? undefined : getPlayerProfile(players, item.creatorId);
               const rarityColor = RARITY_COLORS[item.rarity] || '#ffffff';
-              const isGraded = !demo && item.grade !== null;
-              const badgeStyle = isGraded ? getScoreBadgeStyle(item.grade as number) : null;
+              const avgInfo = getItemAverageGrade(item);
+              const isGraded = avgInfo.average !== null;
+              const badgeStyle = isGraded ? getScoreBadgeStyle(avgInfo.average as number) : null;
+              const myVote = getItemVotes(item)[currentPlayerId];
 
               return (
                 <button
@@ -512,33 +544,20 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                       {item.rarity}
                     </span>
 
-                    {demo ? (
+                    {isGraded && badgeStyle && avgInfo.average !== null ? (
                       <span
                         className="mc-badge"
-                        style={{
-                          backgroundColor: '#0e3a46',
-                          color: '#4aedf9',
-                          border: '2px solid #4aedf9',
-                          fontFamily: "'Silkscreen', monospace",
-                          fontSize: '0.64rem',
-                          padding: '3px 6px',
-                        }}
-                      >
-                        DEMO
-                      </span>
-                    ) : isGraded && badgeStyle ? (
-                      <span
-                        className="mc-badge"
+                        title={`Average ${formatAverageScore(avgInfo.average)}/10 from ${avgInfo.count} ${avgInfo.count === 1 ? 'vote' : 'votes'}`}
                         style={{
                           backgroundColor: badgeStyle.bg,
                           color: badgeStyle.color,
                           border: `2px solid ${badgeStyle.border}`,
                           fontFamily: "'Press Start 2P', monospace",
-                          fontSize: '0.68rem',
+                          fontSize: '0.62rem',
                           padding: '4px 7px',
                         }}
                       >
-                        {item.grade}/10
+                        ★ {formatAverageScore(avgInfo.average)} ({avgInfo.count})
                       </span>
                     ) : (
                       <span
@@ -548,11 +567,11 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                           color: '#ffdd55',
                           border: '2px solid #d4a017',
                           fontFamily: "'Silkscreen', monospace",
-                          fontSize: '0.64rem',
+                          fontSize: '0.62rem',
                           padding: '3px 6px',
                         }}
                       >
-                        PENDING
+                        NO VOTES
                       </span>
                     )}
                   </div>
@@ -629,6 +648,18 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                         >
                           Neon
                         </span>
+                        {myVote && (
+                          <span
+                            style={{
+                              fontFamily: "'VT323', monospace",
+                              fontSize: '1rem',
+                              color: '#55ff55',
+                              marginLeft: 'auto',
+                            }}
+                          >
+                            You:{myVote.score}
+                          </span>
+                        )}
                       </>
                     ) : (
                       <>
@@ -652,6 +683,18 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                         >
                           {creator?.name || 'Crafter'}
                         </span>
+                        {myVote && (
+                          <span
+                            style={{
+                              fontFamily: "'VT323', monospace",
+                              fontSize: '1rem',
+                              color: '#55ff55',
+                              marginLeft: 'auto',
+                            }}
+                          >
+                            You:{myVote.score}
+                          </span>
+                        )}
                       </>
                     )}
                   </div>
@@ -795,15 +838,48 @@ export const SharedChest: React.FC<SharedChestProps> = ({
               {inspectItem.description || 'No description written.'}
             </div>
 
-            {/* Creator & Recipient Metadata */}
+            {/* Creator & Voting Metadata */}
             {(() => {
               const inspectIsDemo = isDemoItem(inspectItem);
               const inspectCreator = inspectIsDemo
                 ? undefined
                 : getPlayerProfile(players, inspectItem.creatorId);
-              const inspectRecipient = inspectIsDemo
-                ? undefined
-                : getPlayerProfile(players, inspectItem.recipientId);
+              const inspectVotes = getItemVotes(inspectItem);
+              const inspectAvg = getItemAverageGrade(inspectItem);
+              const myVote = inspectVotes[currentPlayerId];
+              const canChange = canPlayerChangeVote(myVote);
+              const changesLeft = myVote
+                ? Math.max(0, MAX_VOTE_CHANGES - (myVote.changesUsed ?? 0))
+                : MAX_VOTE_CHANGES;
+              const hasModalDiff = !myVote
+                ? modalScore !== null
+                : modalScore !== null &&
+                  (modalScore !== myVote.score ||
+                    modalComment.trim() !== (myVote.comment || '').trim());
+
+              const inspectIsCreator = !inspectIsDemo && inspectItem.creatorId === currentPlayerId;
+              const eligibleVoters = playerList.filter(
+                (p) => p.id !== inspectItem.creatorId || Boolean(inspectVotes[p.id])
+              );
+              const knownIds = new Set(eligibleVoters.map((p) => p.id));
+              const extraVoterIds = Object.keys(inspectVotes).filter((id) => !knownIds.has(id));
+              const voterRows = [
+                ...eligibleVoters.map((p) => ({
+                  id: p.id,
+                  name: p.name,
+                  avatarId: p.avatarId,
+                  color: p.color,
+                })),
+                ...extraVoterIds.map((id) => ({
+                  id,
+                  name: 'Crafter',
+                  avatarId: 'knight',
+                  color: '#cccccc',
+                })),
+              ];
+              const modalScores = Object.values(inspectVotes).map((v) => v.score);
+              const modalHigh = modalScores.length > 0 ? Math.max(...modalScores) : null;
+              const modalLow = modalScores.length > 0 ? Math.min(...modalScores) : null;
 
               return (
                 <>
@@ -842,6 +918,7 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                             <strong style={{ color: '#55ff55' }}>
                               {inspectCreator?.name || 'Crafter'}
                             </strong>
+                            {inspectItem.creatorId === currentPlayerId ? ' (You)' : ''}
                           </span>
                         </>
                       )}
@@ -851,27 +928,15 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                     </span>
                   </div>
 
-                  {/* Grade & Comment Section */}
+                  {/* Votes, Average & Per-Player Breakdown Section */}
                   <div
                     style={{
                       borderTop: '2px solid rgba(255,255,255,0.15)',
                       paddingTop: '14px',
                     }}
                   >
-                    {inspectIsDemo ? (
-                      <div
-                        style={{
-                          textAlign: 'center',
-                          fontFamily: "'Silkscreen', monospace",
-                          fontSize: '0.78rem',
-                          color: '#4aedf9',
-                          padding: '8px',
-                        }}
-                      >
-                        ✦ Starter Demo Item by Neon • View-only
-                      </div>
-                    ) : inspectItem.grade !== null ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        {/* Average Score Summary */}
                         <div
                           style={{
                             display: 'flex',
@@ -885,54 +950,513 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                             style={{
                               fontFamily: "'Silkscreen', monospace",
                               fontSize: '0.8rem',
-                              color: '#dddddd',
+                              color: '#ffdd55',
                             }}
                           >
-                            RATED BY {(inspectRecipient?.name || 'PARTNER').toUpperCase()}
+                            📊 AVERAGE ({inspectAvg.count}{' '}
+                            {inspectAvg.count === 1 ? 'VOTE' : 'VOTES'})
                           </span>
-                          <span
-                            className="mc-badge"
-                            style={{
-                              backgroundColor: getScoreBadgeStyle(inspectItem.grade).bg,
-                              color: getScoreBadgeStyle(inspectItem.grade).color,
-                              border: `2px solid ${getScoreBadgeStyle(inspectItem.grade).border}`,
-                              fontFamily: "'Press Start 2P', monospace",
-                              fontSize: '0.88rem',
-                              padding: '6px 12px',
-                            }}
-                          >
-                            {inspectItem.grade}/10 • {GRADE_TITLES[inspectItem.grade] || 'Rated'}
-                          </span>
+                          {inspectAvg.average !== null ? (
+                            <span
+                              className="mc-badge"
+                              style={{
+                                backgroundColor: getScoreBadgeStyle(inspectAvg.average).bg,
+                                color: getScoreBadgeStyle(inspectAvg.average).color,
+                                border: `2px solid ${getScoreBadgeStyle(inspectAvg.average).border}`,
+                                fontFamily: "'Press Start 2P', monospace",
+                                fontSize: '0.82rem',
+                                padding: '6px 12px',
+                              }}
+                            >
+                              {formatAverageScore(inspectAvg.average)}/10 •{' '}
+                              {GRADE_TITLES[Math.round(inspectAvg.average)] || 'Rated'}
+                            </span>
+                          ) : (
+                            <span
+                              style={{
+                                fontFamily: "'VT323', monospace",
+                                fontSize: '1.2rem',
+                                color: '#ffdd55',
+                              }}
+                            >
+                              No votes yet!
+                            </span>
+                          )}
                         </div>
 
-                        {inspectItem.gradeComment && (
+                        {/* Creator Quick Stats Row (High/Low & Participation) */}
+                        {inspectIsCreator && (
                           <div
                             style={{
-                              backgroundColor: 'rgba(85, 255, 85, 0.08)',
-                              borderLeft: '4px solid #55ff55',
-                              padding: '10px 12px',
-                              fontFamily: "'VT323', monospace",
-                              fontSize: '1.35rem',
-                              color: '#eaffea',
+                              display: 'grid',
+                              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                              gap: '8px',
                             }}
                           >
-                            “{inspectItem.gradeComment}”
+                            <div
+                              style={{
+                                backgroundColor: 'rgba(255,255,255,0.05)',
+                                border: '2px solid rgba(85,180,255,0.35)',
+                                padding: '8px 10px',
+                                textAlign: 'center',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontFamily: "'Silkscreen', monospace",
+                                  fontSize: '0.64rem',
+                                  color: '#9ad8ff',
+                                }}
+                              >
+                                VOTES RECEIVED
+                              </div>
+                              <div
+                                style={{
+                                  fontFamily: "'Press Start 2P', monospace",
+                                  fontSize: '0.88rem',
+                                  color: '#55ff55',
+                                  marginTop: '4px',
+                                }}
+                              >
+                                {inspectAvg.count}/
+                                {Math.max(
+                                  inspectAvg.count,
+                                  playerList.filter((p) => p.id !== inspectItem.creatorId).length
+                                )}
+                              </div>
+                            </div>
+                            <div
+                              style={{
+                                backgroundColor: 'rgba(255,255,255,0.05)',
+                                border: '2px solid rgba(85,180,255,0.35)',
+                                padding: '8px 10px',
+                                textAlign: 'center',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontFamily: "'Silkscreen', monospace",
+                                  fontSize: '0.64rem',
+                                  color: '#9ad8ff',
+                                }}
+                              >
+                                HIGH / LOW
+                              </div>
+                              <div
+                                style={{
+                                  fontFamily: "'Press Start 2P', monospace",
+                                  fontSize: '0.88rem',
+                                  color: '#ffdd55',
+                                  marginTop: '4px',
+                                }}
+                              >
+                                {modalHigh !== null ? `${modalHigh} / ${modalLow}` : '—'}
+                              </div>
+                            </div>
                           </div>
                         )}
+
+                        {/* Every Player's Vote List */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          {voterRows.length === 0 ? (
+                            <div
+                              style={{
+                                textAlign: 'center',
+                                fontFamily: "'VT323', monospace",
+                                fontSize: '1.2rem',
+                                color: '#bbbbbb',
+                                padding: '8px',
+                              }}
+                            >
+                              No other players in this Realm yet — invite friends so they can vote
+                              and comment!
+                            </div>
+                          ) : (
+                            voterRows.map((p) => {
+                            const v = inspectVotes[p.id];
+                            const vStyle = v ? getScoreBadgeStyle(v.score) : null;
+                            const prevHistory = v?.history && v.history.length > 0 ? v.history : null;
+                            const lastPrev = prevHistory ? prevHistory[prevHistory.length - 1] : null;
+                            return (
+                              <div
+                                key={p.id}
+                                style={{
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: '8px',
+                                  padding: '8px 10px',
+                                  backgroundColor: 'rgba(255,255,255,0.05)',
+                                  border: `2px solid ${
+                                    p.id === currentPlayerId
+                                      ? 'rgba(85,255,85,0.55)'
+                                      : 'rgba(255,255,255,0.12)'
+                                  }`,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: '10px',
+                                    flexWrap: 'wrap',
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '8px',
+                                      minWidth: 0,
+                                    }}
+                                  >
+                                    <img
+                                      src={getAvatarUrl(p.avatarId)}
+                                      alt={p.name}
+                                      className="mc-pixelated"
+                                      style={{
+                                        width: '24px',
+                                        height: '24px',
+                                        imageRendering: 'pixelated',
+                                      }}
+                                    />
+                                    <div style={{ minWidth: 0 }}>
+                                      <div
+                                        style={{
+                                          fontFamily: "'Silkscreen', monospace",
+                                          fontSize: '0.74rem',
+                                          color: p.color || '#ffffff',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: '6px',
+                                          flexWrap: 'wrap',
+                                        }}
+                                      >
+                                        <span>
+                                          {p.name}
+                                          {p.id === currentPlayerId ? ' (You)' : ''}
+                                        </span>
+                                        {v && v.changesUsed > 0 && (
+                                          <span
+                                            className="mc-badge"
+                                            style={{
+                                              fontSize: '0.56rem',
+                                              padding: '2px 5px',
+                                              backgroundColor: '#3a2248',
+                                              color: '#e2b8ff',
+                                              border: '1px solid #b866d6',
+                                            }}
+                                          >
+                                            CHANGED
+                                          </span>
+                                        )}
+                                      </div>
+                                      {v?.comment && (
+                                        <div
+                                          style={{
+                                            fontFamily: "'VT323', monospace",
+                                            fontSize: '1.2rem',
+                                            color: '#d8ffd8',
+                                            lineHeight: 1.15,
+                                          }}
+                                        >
+                                          “{v.comment}”
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    {v && vStyle ? (
+                                      <>
+                                        {lastPrev && (
+                                          <span
+                                            style={{
+                                              fontFamily: "'VT323', monospace",
+                                              fontSize: '1.15rem',
+                                              color: '#b5a2cc',
+                                            }}
+                                            title={`Changed from ${lastPrev.score}/10 to ${v.score}/10`}
+                                          >
+                                            <span style={{ textDecoration: 'line-through' }}>
+                                              {lastPrev.score}/10
+                                            </span>{' '}
+                                            →
+                                          </span>
+                                        )}
+                                        <span
+                                          className="mc-badge"
+                                          style={{
+                                            backgroundColor: vStyle.bg,
+                                            color: vStyle.color,
+                                            border: `2px solid ${vStyle.border}`,
+                                            fontFamily: "'Press Start 2P', monospace",
+                                            fontSize: '0.72rem',
+                                            padding: '4px 8px',
+                                          }}
+                                        >
+                                          {v.score}/10
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <span
+                                        style={{
+                                          fontFamily: "'VT323', monospace",
+                                          fontSize: '1.12rem',
+                                          color: '#999999',
+                                        }}
+                                      >
+                                        Not voted yet
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Preserved Previous Vote & Comment History */}
+                                {prevHistory && (
+                                  <div
+                                    style={{
+                                      marginLeft: '32px',
+                                      padding: '6px 10px',
+                                      backgroundColor: 'rgba(184, 102, 214, 0.12)',
+                                      borderLeft: '3px solid #b866d6',
+                                      display: 'flex',
+                                      flexDirection: 'column',
+                                      gap: '4px',
+                                    }}
+                                  >
+                                    {prevHistory.map((h, idx) => (
+                                      <div
+                                        key={`${p.id}-modal-hist-${idx}`}
+                                        style={{
+                                          fontFamily: "'VT323', monospace",
+                                          fontSize: '1.08rem',
+                                          color: '#c9bdd6',
+                                          lineHeight: 1.2,
+                                        }}
+                                      >
+                                        <span style={{ color: '#e2b8ff', fontWeight: 700 }}>
+                                          Previous vote:
+                                        </span>{' '}
+                                        <span style={{ textDecoration: 'line-through' }}>
+                                          {h.score}/10
+                                        </span>
+                                        {h.comment ? (
+                                          <span style={{ color: '#d8d0e4' }}> — “{h.comment}”</span>
+                                        ) : (
+                                          <span style={{ color: '#998fa8' }}> (no comment)</span>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })
+                          )}
+                        </div>
+
+                        {/* Inline Vote / Change Vote Once Controls (hidden for item creator) */}
+                        {inspectIsCreator ? (
+                          <div
+                            style={{
+                              borderTop: '2px solid rgba(255,255,255,0.12)',
+                              paddingTop: '10px',
+                              textAlign: 'center',
+                              fontFamily: "'Silkscreen', monospace",
+                              fontSize: '0.72rem',
+                              color: '#9ad8ff',
+                            }}
+                          >
+                            ✨ You crafted this item — viewing live stats, votes &amp; comments.
+                          </div>
+                        ) : (
+                          onVoteItem && (
+                          <div
+                            style={{
+                              borderTop: '2px solid rgba(255,255,255,0.12)',
+                              paddingTop: '12px',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '10px',
+                            }}
+                          >
+                            {!canChange ? (
+                              <div
+                                style={{
+                                  textAlign: 'center',
+                                  fontFamily: "'Silkscreen', monospace",
+                                  fontSize: '0.74rem',
+                                  color: '#d580ff',
+                                  padding: '6px',
+                                }}
+                              >
+                                🔒 Your vote ({myVote?.score}/10) is locked — you already used your 1
+                                vote change.
+                              </div>
+                            ) : !showVoteEditor && myVote ? (
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  flexWrap: 'wrap',
+                                  gap: '8px',
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    fontFamily: "'VT323', monospace",
+                                    fontSize: '1.2rem',
+                                    color: '#b8ffb8',
+                                  }}
+                                >
+                                  You voted {myVote.score}/10 ({changesLeft} change left)
+                                </span>
+                                <button
+                                  type="button"
+                                  className="mc-btn mc-btn-gold"
+                                  onClick={() => {
+                                    playSound('click');
+                                    setModalScore(myVote.score);
+                                    setModalComment(myVote.comment || '');
+                                    setShowVoteEditor(true);
+                                  }}
+                                  style={{
+                                    fontSize: '0.74rem',
+                                    padding: '8px 12px',
+                                    minHeight: '40px',
+                                  }}
+                                >
+                                  ✏️ CHANGE MY VOTE (1 LEFT)
+                                </button>
+                              </div>
+                            ) : (
+                              <>
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    flexWrap: 'wrap',
+                                    gap: '6px',
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      fontFamily: "'Silkscreen', monospace",
+                                      fontSize: '0.74rem',
+                                      color: '#ffdd55',
+                                    }}
+                                  >
+                                    {myVote
+                                      ? '✏️ CHANGE YOUR VOTE (USES 1 CHANGE):'
+                                      : '🗳️ CAST YOUR VOTE (0–10):'}
+                                  </span>
+                                  {myVote && (
+                                    <button
+                                      type="button"
+                                      className="mc-btn"
+                                      onClick={() => {
+                                        playSound('click');
+                                        setShowVoteEditor(false);
+                                      }}
+                                      style={{
+                                        fontSize: '0.68rem',
+                                        padding: '4px 8px',
+                                        minHeight: '32px',
+                                      }}
+                                    >
+                                      Cancel
+                                    </button>
+                                  )}
+                                </div>
+
+                                <div
+                                  style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(11, minmax(0, 1fr))',
+                                    gap: '4px',
+                                  }}
+                                >
+                                  {SCORE_OPTIONS.map((score) => {
+                                    const selected = modalScore === score;
+                                    const st = getScoreBadgeStyle(score);
+                                    return (
+                                      <button
+                                        key={score}
+                                        type="button"
+                                        onClick={() => {
+                                          playSound('grade');
+                                          setModalScore(score);
+                                        }}
+                                        style={{
+                                          minHeight: '38px',
+                                          padding: '2px',
+                                          cursor: 'pointer',
+                                          fontFamily: "'Press Start 2P', monospace",
+                                          fontSize: score === 10 ? '0.62rem' : '0.72rem',
+                                          color: selected ? '#fff' : '#ddd',
+                                          backgroundColor: selected ? st.bg : '#4a4a4a',
+                                          border: selected
+                                            ? `2px solid ${st.border}`
+                                            : '2px solid #222',
+                                        }}
+                                      >
+                                        {score}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+
+                                <input
+                                  type="text"
+                                  className="mc-input"
+                                  value={modalComment}
+                                  maxLength={120}
+                                  placeholder="Optional note (e.g. Super cool!)"
+                                  onChange={(e) => setModalComment(e.target.value)}
+                                  style={{
+                                    width: '100%',
+                                    boxSizing: 'border-box',
+                                    padding: '8px 10px',
+                                    fontSize: '1.1rem',
+                                  }}
+                                />
+
+                                <button
+                                  type="button"
+                                  className={`mc-btn ${myVote ? 'mc-btn-gold' : 'mc-btn-green'}`}
+                                  disabled={!hasModalDiff}
+                                  onClick={() => {
+                                    if (modalScore === null || !hasModalDiff) return;
+                                    playSound('xp');
+                                    onVoteItem(inspectItem.id, modalScore, modalComment.trim());
+                                    setShowVoteEditor(false);
+                                  }}
+                                  style={{
+                                    width: '100%',
+                                    minHeight: '46px',
+                                    fontFamily: "'Press Start 2P', monospace",
+                                    fontSize: '0.74rem',
+                                    opacity: hasModalDiff ? 1 : 0.5,
+                                    cursor: hasModalDiff ? 'pointer' : 'not-allowed',
+                                  }}
+                                >
+                                  {modalScore === null
+                                    ? 'PICK A SCORE (0–10)'
+                                    : myVote
+                                      ? hasModalDiff
+                                        ? `CONFIRM VOTE CHANGE (${modalScore}/10)`
+                                        : 'PICK A NEW SCORE OR NOTE'
+                                      : `SUBMIT VOTE (${modalScore}/10)`}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )
+                        )}
                       </div>
-                    ) : (
-                      <div
-                        style={{
-                          textAlign: 'center',
-                          fontFamily: "'Silkscreen', monospace",
-                          fontSize: '0.8rem',
-                          color: '#ffdd55',
-                          padding: '8px',
-                        }}
-                      >
-                        ⏳ Waiting for {inspectRecipient?.name || 'partner'} to rate (0–10)...
-                      </div>
-                    )}
                   </div>
 
                   {/* Creator-Only Hide / Unhide Action (disabled for demo items) */}

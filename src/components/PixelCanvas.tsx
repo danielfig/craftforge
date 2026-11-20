@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { COLOR_PALETTES, ITEM_TEMPLATES, ItemTemplate } from '../assets/templates';
 import { renderPixelsToDataUrl } from '../assets/textures';
 import { playSound } from '../utils/sounds';
+import { InlineColorPicker } from './InlineColorPicker';
 
 export type DrawTool = 'pencil' | 'eraser' | 'fill' | 'eyedropper';
 
@@ -664,7 +665,7 @@ export const PixelCanvas: React.FC<PixelCanvasProps> = ({
             </div>
           </div>
 
-          {/* Color Palettes + Custom Color Picker */}
+          {/* Color Palettes + Inline Direct-Click Color Picker */}
           <div
             className="mc-panel-dark"
             style={{
@@ -687,50 +688,52 @@ export const PixelCanvas: React.FC<PixelCanvasProps> = ({
                 🎨 COLORS
               </span>
 
-              <label
+              <div
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '6px',
-                  cursor: 'pointer',
                   background: '#1c1c24',
-                  padding: '3px 6px',
+                  padding: '3px 7px',
                   border: '2px solid #555',
                 }}
-                title="Pick any custom color"
+                title={`Active color: ${activeColor.toUpperCase()}`}
               >
                 <span
                   style={{
-                    width: '20px',
-                    height: '20px',
+                    width: '18px',
+                    height: '18px',
                     backgroundColor: activeColor,
                     border: '2px solid #fff',
                     display: 'inline-block',
+                    flexShrink: 0,
                   }}
                 />
-                <input
-                  type="color"
-                  value={activeColor}
-                  onChange={(e) => {
-                    setActiveColor(e.target.value);
-                    if (tool === 'eraser' || tool === 'eyedropper') {
-                      setTool('pencil');
-                    }
-                  }}
+                <span
                   style={{
-                    width: '24px',
-                    height: '22px',
-                    border: 'none',
-                    padding: 0,
-                    background: 'transparent',
-                    cursor: 'pointer',
+                    fontFamily: "'VT323', monospace",
+                    fontSize: '15px',
+                    color: '#e6e6e6',
+                    letterSpacing: '0.5px',
                   }}
-                  aria-label="Custom color picker"
-                />
-              </label>
+                >
+                  {activeColor.toUpperCase()}
+                </span>
+              </div>
             </div>
 
-            {/* Palette Switcher Dropdown + Prev/Next for compact tablet ergonomics */}
+            {/* Embedded Direct-Click Color Picker (No Pop-up) */}
+            <InlineColorPicker
+              color={activeColor}
+              onChange={(hex) => {
+                setActiveColor(hex);
+                if (tool === 'eraser' || tool === 'eyedropper') {
+                  setTool('pencil');
+                }
+              }}
+            />
+
+            {/* Palette Switcher Dropdown */}
             <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
               <select
                 value={selectedPaletteIdx}

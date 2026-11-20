@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './styles/minecraft.css';
-import { CraftItem, PlayerId, PlayerProfile, RealmState } from './types';
+import { CraftItem, ItemVote, ItemVoteSnapshot, PlayerId, PlayerProfile, RealmState } from './types';
 import {
   CloudSyncConfig,
+  MAX_VOTE_CHANGES,
   PLAYER_ACCENT_COLORS,
   SyncStatus,
   createStarterRealm,
   findPlayerByName,
   generateItemId,
+  getItemVotes,
   hashPin,
   hashRealmSecret,
   isDemoItem,
@@ -67,6 +69,7 @@ export default function App() {
   // Keep latest realm in a ref for async cloud sync merges
   const realmRef = useRef(realm);
   realmRef.current = realm;
+  const syncInFlightRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
 
   const showToast = useCallback((msg: string) => {
@@ -104,41 +107,54 @@ export default function App() {
 
   const syncNow = useCallback(
     async (configOverride?: CloudSyncConfig, realmOverride?: RealmState) => {
+      if (syncInFlightRef.current) return;
       const cfg = configOverride || cloudConfig;
-      const current = realmOverride || realmRef.current;
+      const initial = realmOverride || realmRef.current;
 
       if (!cfg.enabled || !cfg.projectId) {
         setSyncStatus({ state: 'local', message: 'Local Mode', lastSyncedAt: null });
         return;
       }
 
-      if (!current.realmCodeHash && !current.realmPassword) {
+      if (!initial.realmCodeHash && !initial.realmPassword) {
         setSyncStatus({ state: 'synced', message: 'CraftForge Cloud Ready', lastSyncedAt: null });
         return;
       }
 
+      syncInFlightRef.current = true;
       setSyncStatus((prev) => ({ ...prev, state: 'syncing', message: 'Syncing...' }));
       try {
         const remote = await pullRealmFromCloud(
           cfg,
-          current.realmCode,
-          current.realmPassword,
-          current.realmCodeHash
+          initial.realmCode,
+          initial.realmPassword,
+          initial.realmCodeHash
         );
-        let finalState = current;
+        // Re-read the freshest local state AFTER the network pull so concurrent local votes/saves are never overwritten
+        const latestLocal = realmRef.current;
+        const stillSameRealm =
+          latestLocal.realmCode === initial.realmCode &&
+          latestLocal.realmCodeHash === initial.realmCodeHash;
+        if (!stillSameRealm) {
+          return;
+        }
+        let finalState = latestLocal;
         if (remote) {
-          finalState = mergeRealmStates(current, remote);
+          finalState = mergeRealmStates(latestLocal, remote);
+          realmRef.current = finalState;
           setRealm(finalState);
         }
         await pushRealmToCloud(cfg, finalState);
         setSyncStatus({
           state: 'synced',
-          message: `Synced (${current.realmCode})`,
+          message: `Synced (${finalState.realmCode})`,
           lastSyncedAt: Date.now(),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Sync failed';
         setSyncStatus({ state: 'error', message: msg, lastSyncedAt: null });
+      } finally {
+        syncInFlightRef.current = false;
       }
     },
     [cloudConfig]
@@ -173,9 +189,8 @@ export default function App() {
     return realm.items.filter(
       (item) =>
         !item.hidden &&
-        !isDemoItem(item) &&
-        item.recipientId === activePlayerId &&
-        item.grade === null
+        item.creatorId !== activePlayerId &&
+        !getItemVotes(item)[activePlayerId]
     ).length;
   }, [realm.items, activePlayerId]);
 
@@ -327,29 +342,34 @@ export default function App() {
   const handleSendItem = (
     draft: Omit<
       CraftItem,
-      'id' | 'realmCode' | 'creatorId' | 'recipientId' | 'createdAt' | 'grade' | 'gradeComment' | 'gradedAt'
-    >,
-    recipientId: PlayerId
+      | 'id'
+      | 'realmCode'
+      | 'creatorId'
+      | 'recipientId'
+      | 'createdAt'
+      | 'grade'
+      | 'gradeComment'
+      | 'gradedAt'
+      | 'votes'
+    >
   ) => {
     if (!activePlayerId) return;
-    const resolvedRecipient =
-      recipientId && realm.players[recipientId] && recipientId !== activePlayerId
-        ? recipientId
-        : otherPlayers[0]?.id;
-    if (!resolvedRecipient) return;
+    const latest = realmRef.current;
     const newItem: CraftItem = {
       ...draft,
       id: generateItemId(),
-      realmCode: realm.realmCode,
+      realmCode: latest.realmCode,
       creatorId: activePlayerId,
-      recipientId: resolvedRecipient,
+      recipientId: 'all',
       createdAt: Date.now(),
       grade: null,
+      votes: {},
     };
     const nextRealm: RealmState = {
-      ...realm,
-      items: [newItem, ...realm.items],
+      ...latest,
+      items: [newItem, ...latest.items],
     };
+    realmRef.current = nextRealm;
     setRealm(nextRealm);
     if (cloudConfig.enabled && cloudConfig.projectId) {
       void pushRealmToCloud(cloudConfig, nextRealm).catch(() => {
@@ -359,22 +379,66 @@ export default function App() {
   };
 
   const handleGradeItem = (itemId: string, grade: number, comment: string) => {
-    const target = realm.items.find((item) => item.id === itemId);
-    if (!target || isDemoItem(target)) return;
+    if (!activePlayerId) return;
+    const latest = realmRef.current;
+    const target = latest.items.find((item) => item.id === itemId);
+    if (!target || target.creatorId === activePlayerId) return;
+
+    const existingVotes = getItemVotes(target);
+    const prevVote = existingVotes[activePlayerId];
+    if (prevVote && (prevVote.changesUsed ?? 0) >= MAX_VOTE_CHANGES) {
+      return;
+    }
+
     const clampedGrade = Math.max(0, Math.min(10, Math.round(grade)));
+    const trimmedComment = comment.trim() || undefined;
+    const now = Date.now();
+    const nextHistory: ItemVoteSnapshot[] | undefined = prevVote
+      ? [
+          ...(prevVote.history || []),
+          {
+            score: prevVote.score,
+            ...(prevVote.comment ? { comment: prevVote.comment } : {}),
+            votedAt: prevVote.votedAt,
+          },
+        ]
+      : undefined;
+    const nextVote: ItemVote = {
+      playerId: activePlayerId,
+      score: clampedGrade,
+      ...(trimmedComment ? { comment: trimmedComment } : {}),
+      votedAt: now,
+      changesUsed: prevVote ? (prevVote.changesUsed ?? 0) + 1 : 0,
+      ...(nextHistory && nextHistory.length > 0 ? { history: nextHistory } : {}),
+    };
+
+    const nextVotes: Record<PlayerId, ItemVote> = {
+      ...existingVotes,
+      [activePlayerId]: nextVote,
+    };
+
+    const voteValues = Object.values(nextVotes);
+    const average =
+      voteValues.length > 0
+        ? Math.round((voteValues.reduce((acc, v) => acc + v.score, 0) / voteValues.length) * 10) /
+          10
+        : null;
+
     const nextRealm: RealmState = {
-      ...realm,
-      items: realm.items.map((item) =>
-        item.id === itemId && !isDemoItem(item)
+      ...latest,
+      items: latest.items.map((item) =>
+        item.id === itemId
           ? {
               ...item,
-              grade: clampedGrade,
-              gradeComment: comment.trim() || undefined,
-              gradedAt: Date.now(),
+              votes: nextVotes,
+              grade: average,
+              gradeComment: trimmedComment ?? item.gradeComment,
+              gradedAt: now,
             }
           : item
       ),
     };
+    realmRef.current = nextRealm;
     setRealm(nextRealm);
     if (cloudConfig.enabled && cloudConfig.projectId) {
       void pushRealmToCloud(cloudConfig, nextRealm).catch(() => {
@@ -385,11 +449,12 @@ export default function App() {
 
   const handleToggleHideItem = (itemId: string) => {
     if (!activePlayerId) return;
-    const target = realm.items.find((item) => item.id === itemId);
+    const latest = realmRef.current;
+    const target = latest.items.find((item) => item.id === itemId);
     if (!target || isDemoItem(target) || target.creatorId !== activePlayerId) return;
     const nextRealm: RealmState = {
-      ...realm,
-      items: realm.items.map((item) =>
+      ...latest,
+      items: latest.items.map((item) =>
         item.id === itemId && !isDemoItem(item) && item.creatorId === activePlayerId
           ? {
               ...item,
@@ -399,6 +464,7 @@ export default function App() {
           : item
       ),
     };
+    realmRef.current = nextRealm;
     setRealm(nextRealm);
     if (cloudConfig.enabled && cloudConfig.projectId) {
       void pushRealmToCloud(cloudConfig, nextRealm).catch(() => {
@@ -1041,9 +1107,9 @@ export default function App() {
             setActiveTab('inbox');
           }}
         >
-          📬 Inbox to Rate
+          🗳️ Vote on Items
           {unratedCount > 0 && (
-            <span className="mc-badge cf-unrated-badge" aria-label={`${unratedCount} unrated items`}>
+            <span className="mc-badge cf-unrated-badge" aria-label={`${unratedCount} items to vote on`}>
               {unratedCount}
             </span>
           )}
@@ -1073,7 +1139,7 @@ export default function App() {
 
         {activeTab === 'inbox' && (
           <InboxGrader
-            items={realm.items.filter((item) => !item.hidden && !isDemoItem(item))}
+            items={realm.items.filter((item) => !item.hidden)}
             players={realm.players}
             currentPlayerId={activePlayerId}
             onGradeItem={handleGradeItem}
@@ -1086,6 +1152,7 @@ export default function App() {
             players={realm.players}
             currentPlayerId={activePlayerId}
             onToggleHideItem={handleToggleHideItem}
+            onVoteItem={handleGradeItem}
           />
         )}
       </main>

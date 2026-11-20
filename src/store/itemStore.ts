@@ -1,4 +1,4 @@
-import { CraftItem, PlayerId, PlayerProfile, RealmState } from '../types';
+import { CraftItem, ItemVote, ItemVoteSnapshot, PlayerId, PlayerProfile, RealmState } from '../types';
 
 const STORAGE_REALM_KEY = 'craftforge_realm_v1';
 const STORAGE_PLAYER_KEY = 'craftforge_active_player_v1';
@@ -118,6 +118,131 @@ export const STARTER_DEMO_IDS = new Set<string>([
   'starter-magma-apple',
 ]);
 
+export const MAX_VOTE_CHANGES = 1;
+
+export function getItemVotes(item: CraftItem): Record<PlayerId, ItemVote> {
+  const out: Record<PlayerId, ItemVote> = {};
+  if (item.votes && typeof item.votes === 'object') {
+    for (const [key, rawVote] of Object.entries(item.votes)) {
+      if (!rawVote || typeof rawVote !== 'object') continue;
+      const pid = (rawVote.playerId || key || '').trim();
+      if (!pid || pid === 'neon' || pid === 'all') continue;
+      if (typeof rawVote.score !== 'number' || Number.isNaN(rawVote.score)) continue;
+      const score = Math.max(0, Math.min(10, Math.round(rawVote.score)));
+      const changesUsed = Math.max(
+        0,
+        Math.min(MAX_VOTE_CHANGES, Math.floor(rawVote.changesUsed ?? 0))
+      );
+      const comment =
+        typeof rawVote.comment === 'string' && rawVote.comment.trim()
+          ? rawVote.comment.trim()
+          : undefined;
+      const history: ItemVoteSnapshot[] = [];
+      if (Array.isArray(rawVote.history)) {
+        for (const h of rawVote.history) {
+          if (!h || typeof h !== 'object') continue;
+          if (typeof h.score !== 'number' || Number.isNaN(h.score)) continue;
+          const hComment =
+            typeof h.comment === 'string' && h.comment.trim() ? h.comment.trim() : undefined;
+          history.push({
+            score: Math.max(0, Math.min(10, Math.round(h.score))),
+            ...(hComment ? { comment: hComment } : {}),
+            votedAt:
+              typeof h.votedAt === 'number'
+                ? h.votedAt
+                : typeof rawVote.votedAt === 'number'
+                  ? rawVote.votedAt
+                  : item.createdAt,
+          });
+        }
+      }
+      out[pid] = {
+        playerId: pid,
+        score,
+        ...(comment ? { comment } : {}),
+        votedAt: typeof rawVote.votedAt === 'number' ? rawVote.votedAt : item.gradedAt || item.createdAt,
+        changesUsed,
+        ...(history.length > 0 ? { history } : {}),
+      };
+    }
+  }
+
+  // Backward compatibility: migrate legacy single-recipient grade when votes map is empty
+  if (
+    Object.keys(out).length === 0 &&
+    item.grade !== null &&
+    typeof item.grade === 'number' &&
+    !Number.isNaN(item.grade) &&
+    item.recipientId &&
+    item.recipientId !== 'neon' &&
+    item.recipientId !== 'all'
+  ) {
+    const comment =
+      typeof item.gradeComment === 'string' && item.gradeComment.trim()
+        ? item.gradeComment.trim()
+        : undefined;
+    out[item.recipientId] = {
+      playerId: item.recipientId,
+      score: Math.max(0, Math.min(10, Math.round(item.grade))),
+      ...(comment ? { comment } : {}),
+      votedAt: item.gradedAt || item.createdAt,
+      changesUsed: 0,
+    };
+  }
+
+  return out;
+}
+
+export function getItemAverageGrade(item: CraftItem): { average: number | null; count: number } {
+  const votes = Object.values(getItemVotes(item));
+  if (votes.length === 0) {
+    return { average: null, count: 0 };
+  }
+  const sum = votes.reduce((acc, v) => acc + v.score, 0);
+  return { average: sum / votes.length, count: votes.length };
+}
+
+export function formatAverageScore(average: number): string {
+  const rounded = Math.round(average * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+export function canPlayerChangeVote(vote: ItemVote | undefined): boolean {
+  if (!vote) return true;
+  return (vote.changesUsed ?? 0) < MAX_VOTE_CHANGES;
+}
+
+export function mergeItemVotes(
+  localVotes: Record<PlayerId, ItemVote>,
+  remoteVotes: Record<PlayerId, ItemVote>
+): Record<PlayerId, ItemVote> {
+  const merged: Record<PlayerId, ItemVote> = { ...localVotes };
+  for (const [pid, rVote] of Object.entries(remoteVotes)) {
+    const lVote = merged[pid];
+    if (!lVote) {
+      merged[pid] = rVote;
+    } else if ((rVote.changesUsed ?? 0) > (lVote.changesUsed ?? 0)) {
+      const preservedHistory =
+        rVote.history && rVote.history.length > 0 ? rVote.history : lVote.history;
+      merged[pid] = {
+        ...rVote,
+        ...(preservedHistory && preservedHistory.length > 0 ? { history: preservedHistory } : {}),
+      };
+    } else if (
+      (rVote.changesUsed ?? 0) === (lVote.changesUsed ?? 0) &&
+      (rVote.votedAt || 0) >= (lVote.votedAt || 0)
+    ) {
+      const preservedHistory =
+        rVote.history && rVote.history.length > 0 ? rVote.history : lVote.history;
+      merged[pid] = {
+        ...rVote,
+        ...(preservedHistory && preservedHistory.length > 0 ? { history: preservedHistory } : {}),
+      };
+    }
+  }
+  return merged;
+}
+
 export function isDemoItem(
   item: Pick<CraftItem, 'id' | 'isDemo' | 'creatorId'>
 ): boolean {
@@ -166,8 +291,31 @@ export function createStarterDemoItems(realmCode = 'FAMILY-CRAFT'): CraftItem[] 
 }
 
 export function normalizeStarterDemoItems(items: CraftItem[], realmCode: string): CraftItem[] {
-  const userItems = items.filter((item) => !STARTER_DEMO_IDS.has(item.id) && !item.isDemo);
-  const demoItems = createStarterDemoItems(realmCode);
+  const existingDemoById = new Map<string, CraftItem>();
+  const userItems: CraftItem[] = [];
+
+  for (const item of items) {
+    if (STARTER_DEMO_IDS.has(item.id) || item.isDemo) {
+      existingDemoById.set(item.id, item);
+    } else {
+      userItems.push(item);
+    }
+  }
+
+  const demoItems = createStarterDemoItems(realmCode).map((demo) => {
+    const prev = existingDemoById.get(demo.id);
+    if (!prev) return demo;
+    const votes = getItemVotes(prev);
+    const { average } = getItemAverageGrade(prev);
+    return {
+      ...demo,
+      votes,
+      grade: average !== null ? Math.round(average * 10) / 10 : null,
+      ...(prev.gradeComment ? { gradeComment: prev.gradeComment } : {}),
+      ...(prev.gradedAt ? { gradedAt: prev.gradedAt } : {}),
+    };
+  });
+
   return [...userItems, ...demoItems].sort((a, b) => b.createdAt - a.createdAt);
 }
 
@@ -507,19 +655,19 @@ export function mergeRealmStates(local: RealmState, remote: RealmState): RealmSt
     if (!existing) {
       byId.set(rItem.id, rItem);
     } else {
-      // Prefer whichever copy has a grade, or the more recently graded/created copy
-      let winner = existing;
-      const existingGraded = existing.grade !== null;
-      const remoteGraded = rItem.grade !== null;
-      if (remoteGraded && !existingGraded) {
-        winner = rItem;
-      } else if (remoteGraded && existingGraded) {
-        const rTime = rItem.gradedAt || rItem.createdAt;
-        const eTime = existing.gradedAt || existing.createdAt;
-        if (rTime >= eTime) winner = rItem;
-      } else if (rItem.createdAt > existing.createdAt) {
-        winner = rItem;
-      }
+      // Merge per-player votes without losing concurrent votes from other devices
+      const mergedVotes = mergeItemVotes(getItemVotes(existing), getItemVotes(rItem));
+      const voteList = Object.values(mergedVotes);
+      const mergedAverage =
+        voteList.length > 0
+          ? Math.round((voteList.reduce((acc, v) => acc + v.score, 0) / voteList.length) * 10) / 10
+          : null;
+      const latestVoteAt =
+        voteList.length > 0
+          ? Math.max(...voteList.map((v) => v.votedAt || 0))
+          : undefined;
+
+      const winner = rItem.createdAt > existing.createdAt ? rItem : existing;
 
       // Independently merge hidden state using the latest hiddenUpdatedAt timestamp
       const eHideTs = existing.hiddenUpdatedAt || 0;
@@ -528,6 +676,9 @@ export function mergeRealmStates(local: RealmState, remote: RealmState): RealmSt
 
       byId.set(rItem.id, {
         ...winner,
+        votes: mergedVotes,
+        grade: mergedAverage,
+        gradedAt: latestVoteAt ?? winner.gradedAt,
         hidden: Boolean(hiddenSource.hidden),
         hiddenUpdatedAt: Math.max(eHideTs, rHideTs) || undefined,
       });
