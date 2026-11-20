@@ -106,9 +106,21 @@ const STARTER_APPLE_PIXELS = parsePixelGrid(
   }
 );
 
-export function createStarterRealm(realmCode = 'FAMILY-CRAFT'): RealmState {
-  const now = Date.now();
-  const starterItems: CraftItem[] = [
+export const STARTER_DEMO_IDS = new Set<string>([
+  'starter-emerald-thunderblade',
+  'starter-magma-apple',
+]);
+
+export function isDemoItem(
+  item: Pick<CraftItem, 'id' | 'isDemo' | 'creatorId'>
+): boolean {
+  return Boolean(item.isDemo || item.creatorId === 'neon' || STARTER_DEMO_IDS.has(item.id));
+}
+
+export function createStarterDemoItems(realmCode = 'FAMILY-CRAFT'): CraftItem[] {
+  // Fixed older timestamps so player-crafted items always sort above starter demos
+  const baseTime = Date.UTC(2026, 0, 1, 12, 0, 0);
+  return [
     {
       id: 'starter-emerald-thunderblade',
       realmCode,
@@ -119,10 +131,12 @@ export function createStarterRealm(realmCode = 'FAMILY-CRAFT'): RealmState {
       rarity: 'legendary',
       enchanted: true,
       pixels: STARTER_SWORD_PIXELS,
-      creatorId: 'player1',
-      recipientId: 'player2',
-      createdAt: now - 1000 * 60 * 30,
+      creatorId: 'neon',
+      recipientId: 'neon',
+      createdAt: baseTime + 1000 * 60 * 60,
       grade: null,
+      hidden: false,
+      isDemo: true,
     },
     {
       id: 'starter-magma-apple',
@@ -134,22 +148,30 @@ export function createStarterRealm(realmCode = 'FAMILY-CRAFT'): RealmState {
       rarity: 'epic',
       enchanted: false,
       pixels: STARTER_APPLE_PIXELS,
-      creatorId: 'player2',
-      recipientId: 'player1',
-      createdAt: now - 1000 * 60 * 90,
-      grade: 9,
-      gradeComment: 'Super bouncy and spicy! Almost melted my boots!',
-      gradedAt: now - 1000 * 60 * 45,
+      creatorId: 'neon',
+      recipientId: 'neon',
+      createdAt: baseTime,
+      grade: null,
+      hidden: false,
+      isDemo: true,
     },
   ];
+}
 
+export function normalizeStarterDemoItems(items: CraftItem[], realmCode: string): CraftItem[] {
+  const userItems = items.filter((item) => !STARTER_DEMO_IDS.has(item.id) && !item.isDemo);
+  const demoItems = createStarterDemoItems(realmCode);
+  return [...userItems, ...demoItems].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export function createStarterRealm(realmCode = 'FAMILY-CRAFT'): RealmState {
   return {
     realmCode,
     players: {
       player1: { ...DEFAULT_PLAYERS.player1 },
       player2: { ...DEFAULT_PLAYERS.player2 },
     },
-    items: starterItems,
+    items: createStarterDemoItems(realmCode),
   };
 }
 
@@ -163,6 +185,49 @@ export function sanitizeRealmCode(raw: string): string {
   return cleaned || 'FAMILY-CRAFT';
 }
 
+const EXTRA_PLAYER_COLORS = ['#ffaa00', '#ff66cc', '#aa88ff', '#55ffff', '#ff7755', '#ffee55'];
+
+function normalizePlayersMap(
+  rawPlayers: Record<string, Partial<PlayerProfile>> | undefined
+): Record<PlayerId, PlayerProfile> {
+  const result: Record<PlayerId, PlayerProfile> = {};
+
+  if (rawPlayers && typeof rawPlayers === 'object') {
+    let idx = 0;
+    for (const [key, profile] of Object.entries(rawPlayers)) {
+      const id = (profile?.id || key || '').trim();
+      if (!id || id === 'neon') continue;
+      const fallback = DEFAULT_PLAYERS[id];
+      result[id] = {
+        id,
+        name: (profile?.name || fallback?.name || `Player ${idx + 1}`).trim() || `Player ${idx + 1}`,
+        avatarId: profile?.avatarId || fallback?.avatarId || 'knight',
+        color:
+          profile?.color ||
+          fallback?.color ||
+          EXTRA_PLAYER_COLORS[idx % EXTRA_PLAYER_COLORS.length],
+      };
+      idx++;
+    }
+  }
+
+  // Always guarantee at least the 2 default players exist for backward compatibility
+  if (Object.keys(result).length === 0) {
+    return {
+      player1: { ...DEFAULT_PLAYERS.player1 },
+      player2: { ...DEFAULT_PLAYERS.player2 },
+    };
+  }
+  if (!result.player1 && Object.keys(result).length < 2) {
+    result.player1 = { ...DEFAULT_PLAYERS.player1 };
+  }
+  if (!result.player2 && Object.keys(result).length < 2) {
+    result.player2 = { ...DEFAULT_PLAYERS.player2 };
+  }
+
+  return result;
+}
+
 export function loadRealmState(): RealmState {
   try {
     const raw = localStorage.getItem(STORAGE_REALM_KEY);
@@ -173,12 +238,14 @@ export function loadRealmState(): RealmState {
     }
     const parsed = JSON.parse(raw) as Partial<RealmState>;
     const realmCode = sanitizeRealmCode(parsed.realmCode || 'FAMILY-CRAFT');
-    const players: Record<PlayerId, PlayerProfile> = {
-      player1: { ...DEFAULT_PLAYERS.player1, ...(parsed.players?.player1 || {}), id: 'player1' },
-      player2: { ...DEFAULT_PLAYERS.player2, ...(parsed.players?.player2 || {}), id: 'player2' },
-    };
-    const items = Array.isArray(parsed.items) ? parsed.items : [];
-    return { realmCode, players, items };
+    const players = normalizePlayersMap(
+      parsed.players as Record<string, Partial<PlayerProfile>> | undefined
+    );
+    const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
+    const items = normalizeStarterDemoItems(rawItems, realmCode);
+    const nextState: RealmState = { realmCode, players, items };
+    saveRealmState(nextState);
+    return nextState;
   } catch {
     return createStarterRealm();
   }
@@ -195,7 +262,7 @@ export function saveRealmState(state: RealmState): void {
 export function loadActivePlayer(): PlayerId | null {
   try {
     const saved = localStorage.getItem(STORAGE_PLAYER_KEY);
-    if (saved === 'player1' || saved === 'player2') return saved;
+    if (saved && saved.trim() && saved !== 'neon') return saved.trim();
     return null;
   } catch {
     return null;
@@ -311,14 +378,25 @@ export function mergeRealmStates(local: RealmState, remote: RealmState): RealmSt
     }
   }
 
-  const mergedItems = Array.from(byId.values()).sort((a, b) => b.createdAt - a.createdAt);
+  const mergedItems = normalizeStarterDemoItems(Array.from(byId.values()), local.realmCode);
+
+  const mergedPlayers: Record<PlayerId, PlayerProfile> = {
+    ...normalizePlayersMap(local.players),
+  };
+  if (remote.players && typeof remote.players === 'object') {
+    for (const [id, rProfile] of Object.entries(remote.players)) {
+      if (!id || id === 'neon' || !rProfile?.name) continue;
+      mergedPlayers[id] = {
+        ...(mergedPlayers[id] || {}),
+        ...rProfile,
+        id,
+      };
+    }
+  }
 
   return {
     realmCode: local.realmCode,
-    players: {
-      player1: remote.players?.player1?.name ? remote.players.player1 : local.players.player1,
-      player2: remote.players?.player2?.name ? remote.players.player2 : local.players.player2,
-    },
+    players: normalizePlayersMap(mergedPlayers),
     items: mergedItems,
   };
 }

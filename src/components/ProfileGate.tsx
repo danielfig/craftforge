@@ -20,9 +20,19 @@ const SPLASH_TEXTS = [
   'Pixel Powered!',
   'Enchanted Fun!',
   'Double Chest Ready!',
+  '3+ Players Welcome!',
 ];
 
-const PLAYER_IDS: PlayerId[] = ['player1', 'player2'];
+const PLAYER_ACCENT_COLORS = [
+  '#3b8526',
+  '#2d7dd2',
+  '#9b59b6',
+  '#d97706',
+  '#e11d48',
+  '#0d9488',
+];
+
+const PLAY_BTN_CLASSES = ['mc-btn-green', 'mc-btn-gold', 'mc-btn-purple'];
 
 export const ProfileGate: React.FC<ProfileGateProps> = ({
   players,
@@ -43,6 +53,8 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
     }
   }, [realmCode]);
 
+  const playerList = Object.values(localPlayers);
+
   const getAvatarIndex = (avatarId: string): number => {
     if (!AVATARS || AVATARS.length === 0) return 0;
     const idx = AVATARS.findIndex((a) => a.id === avatarId);
@@ -54,6 +66,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
     playSound('click');
     setLocalPlayers((prev) => {
       const current = prev[playerId];
+      if (!current) return prev;
       const currentIdx = getAvatarIndex(current.avatarId);
       const nextIdx = (currentIdx + delta + AVATARS.length) % AVATARS.length;
       return {
@@ -67,28 +80,68 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
   };
 
   const handleNameChange = (playerId: PlayerId, name: string) => {
-    setLocalPlayers((prev) => ({
-      ...prev,
-      [playerId]: {
-        ...prev[playerId],
-        name,
-      },
-    }));
+    setLocalPlayers((prev) => {
+      const current = prev[playerId];
+      if (!current) return prev;
+      return {
+        ...prev,
+        [playerId]: {
+          ...current,
+          name,
+        },
+      };
+    });
+  };
+
+  const handleAddPlayer = () => {
+    playSound('click');
+    setLocalPlayers((prev) => {
+      let nextNum = 3;
+      while (prev[`player${nextNum}`]) {
+        nextNum += 1;
+      }
+      const newId: PlayerId = `player${nextNum}`;
+      const existingList = Object.values(prev);
+      const usedAvatarIds = new Set(existingList.map((p) => p.avatarId));
+      const nextAvatar =
+        AVATARS.find((a) => !usedAvatarIds.has(a.id)) ||
+        AVATARS[existingList.length % Math.max(1, AVATARS.length)];
+      const nextColor =
+        PLAYER_ACCENT_COLORS[existingList.length % PLAYER_ACCENT_COLORS.length];
+
+      return {
+        ...prev,
+        [newId]: {
+          id: newId,
+          name: `Player ${nextNum}`,
+          avatarId: nextAvatar ? nextAvatar.id : 'knight',
+          color: nextColor,
+        },
+      };
+    });
+  };
+
+  const handleRemovePlayer = (playerId: PlayerId) => {
+    if (playerList.length <= 2) return;
+    playSound('click');
+    setLocalPlayers((prev) => {
+      const next = { ...prev };
+      delete next[playerId];
+      return next;
+    });
   };
 
   const handlePlay = (playerId: PlayerId) => {
     playSound('click');
     const cleanRealm = localRealm.trim().toUpperCase() || 'FAMILY-CRAFT';
-    const sanitizedPlayers: Record<PlayerId, PlayerProfile> = {
-      player1: {
-        ...localPlayers.player1,
-        name: localPlayers.player1.name.trim() || 'Dad',
-      },
-      player2: {
-        ...localPlayers.player2,
-        name: localPlayers.player2.name.trim() || 'Son',
-      },
-    };
+    const sanitizedPlayers: Record<PlayerId, PlayerProfile> = {};
+    Object.values(localPlayers).forEach((profile, idx) => {
+      const fallbackName = idx === 0 ? 'Dad' : idx === 1 ? 'Son' : `Player ${idx + 1}`;
+      sanitizedPlayers[profile.id] = {
+        ...profile,
+        name: profile.name.trim() || fallbackName,
+      };
+    });
     onSelectPlayer(playerId, sanitizedPlayers, cleanRealm);
   };
 
@@ -117,12 +170,17 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
         .cf-profile-cards {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 24px;
+          gap: 20px;
           width: 100%;
-          max-width: 960px;
+          max-width: 1140px;
           margin-bottom: 18px;
         }
-        @media (max-width: 680px) {
+        @media (min-width: 960px) {
+          .cf-profile-cards {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+          }
+        }
+        @media (max-width: 660px) {
           .cf-profile-cards {
             grid-template-columns: 1fr;
             gap: 16px;
@@ -136,7 +194,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
           position: 'relative',
           textAlign: 'center',
           marginBottom: '22px',
-          maxWidth: '960px',
+          maxWidth: '1140px',
           width: '100%',
         }}
       >
@@ -192,57 +250,83 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
         </p>
       </div>
 
-      {/* Two Big Tactile Player Cards */}
+      {/* Dynamic Player Cards + Add Player Card */}
       <div className="cf-profile-cards">
-        {PLAYER_IDS.map((pid, idx) => {
-          const profile = localPlayers[pid];
+        {playerList.map((profile, idx) => {
+          const pid = profile.id;
           const avatarIdx = getAvatarIndex(profile.avatarId);
           const avatar = AVATARS[avatarIdx];
-          const isPlayerOne = idx === 0;
-          const displayName = profile.name.trim() || (isPlayerOne ? 'Dad' : 'Son');
+          const fallbackName = idx === 0 ? 'Dad' : idx === 1 ? 'Son' : `Player ${idx + 1}`;
+          const displayName = profile.name.trim() || fallbackName;
+          const badgeColor =
+            profile.color || PLAYER_ACCENT_COLORS[idx % PLAYER_ACCENT_COLORS.length];
+          const playBtnClass = PLAY_BTN_CLASSES[idx % PLAY_BTN_CLASSES.length];
+          const canRemove = playerList.length > 2 && pid !== 'player1' && pid !== 'player2';
 
           return (
             <div
               key={pid}
               className="mc-panel"
               style={{
-                padding: '22px 24px',
+                padding: '20px 22px',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
                 gap: '14px',
               }}
             >
-              {/* Player slot badge */}
+              {/* Player slot badge + optional remove button */}
               <div
                 style={{
                   width: '100%',
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
+                  gap: '8px',
                 }}
               >
                 <span
                   className="mc-badge"
                   style={{
-                    backgroundColor: profile.color || (isPlayerOne ? '#3b8526' : '#2d7dd2'),
+                    backgroundColor: badgeColor,
                     color: '#ffffff',
                     fontFamily: "'Silkscreen', monospace",
-                    fontSize: '0.78rem',
+                    fontSize: '0.76rem',
                     padding: '5px 10px',
                   }}
                 >
                   PLAYER {idx + 1}
                 </span>
-                <span
-                  style={{
-                    fontFamily: "'VT323', monospace",
-                    fontSize: '1.25rem',
-                    color: '#3f3f3f',
-                  }}
-                >
-                  {avatar ? avatar.name : 'Crafter'}
-                </span>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span
+                    style={{
+                      fontFamily: "'VT323', monospace",
+                      fontSize: '1.22rem',
+                      color: '#3f3f3f',
+                    }}
+                  >
+                    {avatar ? avatar.name : 'Crafter'}
+                  </span>
+                  {canRemove && (
+                    <button
+                      type="button"
+                      className="mc-btn mc-btn-red"
+                      onClick={() => handleRemovePlayer(pid)}
+                      aria-label={`Remove ${displayName}`}
+                      title={`Remove ${displayName}`}
+                      style={{
+                        minWidth: '34px',
+                        minHeight: '34px',
+                        padding: '2px 8px',
+                        fontSize: '0.75rem',
+                        fontFamily: "'Press Start 2P', monospace",
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Avatar picker with Prev / Next */}
@@ -250,7 +334,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '14px',
+                  gap: '12px',
                 }}
               >
                 <button
@@ -259,10 +343,10 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
                   aria-label={`Previous avatar for Player ${idx + 1}`}
                   onClick={() => handleCycleAvatar(pid, -1)}
                   style={{
-                    minWidth: '48px',
-                    minHeight: '48px',
-                    padding: '6px 12px',
-                    fontSize: '1.15rem',
+                    minWidth: '46px',
+                    minHeight: '46px',
+                    padding: '6px 10px',
+                    fontSize: '1.1rem',
                   }}
                 >
                   ◀
@@ -274,8 +358,8 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
                   title="Tap to change avatar"
                   className="mc-slot"
                   style={{
-                    width: '104px',
-                    height: '104px',
+                    width: '96px',
+                    height: '96px',
                     padding: '8px',
                     display: 'flex',
                     alignItems: 'center',
@@ -289,8 +373,8 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
                       alt={avatar.name}
                       className="mc-pixelated"
                       style={{
-                        width: '84px',
-                        height: '84px',
+                        width: '78px',
+                        height: '78px',
                         imageRendering: 'pixelated',
                         display: 'block',
                       }}
@@ -308,10 +392,10 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
                   aria-label={`Next avatar for Player ${idx + 1}`}
                   onClick={() => handleCycleAvatar(pid, 1)}
                   style={{
-                    minWidth: '48px',
-                    minHeight: '48px',
-                    padding: '6px 12px',
-                    fontSize: '1.15rem',
+                    minWidth: '46px',
+                    minHeight: '46px',
+                    padding: '6px 10px',
+                    fontSize: '1.1rem',
                   }}
                 >
                   ▶
@@ -325,7 +409,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
                   style={{
                     display: 'block',
                     fontFamily: "'Silkscreen', monospace",
-                    fontSize: '0.75rem',
+                    fontSize: '0.74rem',
                     color: '#373737',
                     marginBottom: '6px',
                     textTransform: 'uppercase',
@@ -339,12 +423,12 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
                   className="mc-input"
                   value={profile.name}
                   maxLength={18}
-                  placeholder={isPlayerOne ? 'Dad' : 'Son'}
+                  placeholder={fallbackName}
                   onChange={(e) => handleNameChange(pid, e.target.value)}
                   style={{
                     width: '100%',
                     boxSizing: 'border-box',
-                    fontSize: '1.15rem',
+                    fontSize: '1.12rem',
                     padding: '10px 12px',
                     textAlign: 'center',
                   }}
@@ -354,12 +438,12 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
               {/* Play Button */}
               <button
                 type="button"
-                className={`mc-btn ${isPlayerOne ? 'mc-btn-green' : 'mc-btn-gold'}`}
+                className={`mc-btn ${playBtnClass}`}
                 onClick={() => handlePlay(pid)}
                 style={{
                   width: '100%',
-                  minHeight: '56px',
-                  fontSize: '0.95rem',
+                  minHeight: '54px',
+                  fontSize: '0.88rem',
                   fontFamily: "'Press Start 2P', monospace",
                   letterSpacing: '0.03em',
                   marginTop: '4px',
@@ -370,6 +454,65 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
             </div>
           );
         })}
+
+        {/* Chunky + ADD PLAYER Card */}
+        <button
+          type="button"
+          onClick={handleAddPlayer}
+          className="mc-panel-dark"
+          style={{
+            padding: '24px 20px',
+            cursor: 'pointer',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '14px',
+            minHeight: '260px',
+            border: '3px dashed #7a7a7a',
+            textAlign: 'center',
+            transition: 'transform 0.1s ease, border-color 0.12s ease',
+          }}
+        >
+          <div
+            className="mc-slot"
+            style={{
+              width: '76px',
+              height: '76px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontFamily: "'Press Start 2P', monospace",
+              fontSize: '2.2rem',
+              color: '#55ff55',
+              textShadow: '2px 2px 0 #000',
+            }}
+          >
+            +
+          </div>
+          <div
+            style={{
+              fontFamily: "'Press Start 2P', monospace",
+              fontSize: '0.9rem',
+              color: '#ffffff',
+              textShadow: '2px 2px 0 #000',
+              lineHeight: 1.4,
+            }}
+          >
+            + ADD PLAYER
+          </div>
+          <div
+            style={{
+              fontFamily: "'VT323', monospace",
+              fontSize: '1.25rem',
+              color: '#cccccc',
+              maxWidth: '220px',
+              lineHeight: 1.25,
+            }}
+          >
+            Invite another sibling, parent, or friend to this Realm!
+          </div>
+        </button>
       </div>
 
       {/* Realm Code Panel */}
@@ -377,7 +520,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
         className="mc-panel-dark"
         style={{
           width: '100%',
-          maxWidth: '960px',
+          maxWidth: '1140px',
           padding: '14px 22px',
           display: 'flex',
           flexWrap: 'wrap',
@@ -406,7 +549,7 @@ export const ProfileGate: React.FC<ProfileGateProps> = ({
               lineHeight: 1.2,
             }}
           >
-            Enter the same code on both tablets to share your chest & inbox!
+            Enter the same code on all tablets to share your chest & inbox!
           </div>
         </div>
 

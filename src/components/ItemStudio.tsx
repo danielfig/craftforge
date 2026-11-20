@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { CraftItem, ItemCategory, ItemRarity, PlayerProfile } from '../types';
+import { CraftItem, ItemCategory, ItemRarity, PlayerId, PlayerProfile } from '../types';
 import { ItemTemplate } from '../assets/templates';
-import { renderPixelsToDataUrl } from '../assets/textures';
+import { AVATARS, renderPixelsToDataUrl } from '../assets/textures';
 import { playSound } from '../utils/sounds';
 import PixelCanvas from './PixelCanvas';
 
@@ -19,8 +19,8 @@ export type NewCraftItemPayload = Omit<
 
 export interface ItemStudioProps {
   currentPlayer: PlayerProfile;
-  otherPlayer: PlayerProfile;
-  onSendItem: (item: NewCraftItemPayload) => void;
+  otherPlayers: PlayerProfile[];
+  onSendItem: (item: NewCraftItemPayload, recipientId: PlayerId) => void;
 }
 
 const CATEGORIES: { id: ItemCategory; icon: string; label: string }[] = [
@@ -120,7 +120,7 @@ function createBlankPixels(): string[] {
 
 export const ItemStudio: React.FC<ItemStudioProps> = ({
   currentPlayer,
-  otherPlayer,
+  otherPlayers,
   onSendItem,
 }) => {
   const [pixels, setPixels] = useState<string[]>(() => createBlankPixels());
@@ -129,12 +129,31 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
   const [category, setCategory] = useState<ItemCategory>('weapon');
   const [rarity, setRarity] = useState<ItemRarity>('rare');
   const [enchanted, setEnchanted] = useState<boolean>(false);
+  const [selectedRecipientId, setSelectedRecipientId] = useState<PlayerId>(
+    () => otherPlayers[0]?.id ?? ''
+  );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [sentToast, setSentToast] = useState<{
     itemName: string;
     recipientName: string;
     previewUrl: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (otherPlayers.length === 0) {
+      if (selectedRecipientId !== '') setSelectedRecipientId('');
+      return;
+    }
+    const stillValid = otherPlayers.some((p) => p.id === selectedRecipientId);
+    if (!stillValid) {
+      setSelectedRecipientId(otherPlayers[0].id);
+    }
+  }, [otherPlayers, selectedRecipientId]);
+
+  const selectedRecipient = useMemo(
+    () => otherPlayers.find((p) => p.id === selectedRecipientId) || otherPlayers[0] || null,
+    [otherPlayers, selectedRecipientId]
+  );
 
   useEffect(() => {
     if (!sentToast) return;
@@ -175,6 +194,11 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
       const trimmedName = name.trim();
       const trimmedDesc = description.trim();
 
+      if (!selectedRecipient) {
+        setErrorMsg('Add another player in the Realm first so you have someone to send to!');
+        playSound('click');
+        return;
+      }
       if (!hasPixels) {
         setErrorMsg('Draw something on the 16×16 canvas (or pick a template) first!');
         playSound('click');
@@ -192,19 +216,22 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
 
       const snapshotUrl = renderPixelsToDataUrl(pixels, 4);
 
-      onSendItem({
-        name: trimmedName,
-        description: finalDescription,
-        category,
-        rarity,
-        enchanted,
-        pixels: pixels.slice(),
-      });
+      onSendItem(
+        {
+          name: trimmedName,
+          description: finalDescription,
+          category,
+          rarity,
+          enchanted,
+          pixels: pixels.slice(),
+        },
+        selectedRecipient.id
+      );
 
       playSound('craft');
       setSentToast({
         itemName: trimmedName,
-        recipientName: otherPlayer.name,
+        recipientName: selectedRecipient.name,
         previewUrl: snapshotUrl,
       });
 
@@ -225,9 +252,9 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
       hasPixels,
       name,
       onSendItem,
-      otherPlayer.name,
       pixels,
       rarity,
+      selectedRecipient,
     ]
   );
 
@@ -515,7 +542,9 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
                   }}
                 >
                   By <strong style={{ color: '#c4e0ff' }}>{currentPlayer.name}</strong> → For{' '}
-                  <strong style={{ color: '#ffdf85' }}>{otherPlayer.name}</strong>
+                  <strong style={{ color: '#ffdf85' }}>
+                    {selectedRecipient ? selectedRecipient.name : 'Another Player'}
+                  </strong>
                 </div>
               </div>
             </div>
@@ -737,9 +766,80 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
             </div>
           )}
 
+          {/* Recipient Selector (shown when 3+ players are in the realm) */}
+          {otherPlayers.length > 1 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <span style={{ fontSize: '11px', fontWeight: 800, color: '#222' }}>
+                📬 SEND TO:
+              </span>
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '6px',
+                }}
+              >
+                {otherPlayers.map((player) => {
+                  const isSelected = selectedRecipient?.id === player.id;
+                  const avatar =
+                    AVATARS.find((a) => a.id === player.avatarId) || AVATARS[0];
+                  return (
+                    <button
+                      key={player.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedRecipientId(player.id);
+                        playSound('click');
+                      }}
+                      className={`mc-btn ${isSelected ? 'mc-btn-gold' : ''}`}
+                      style={{
+                        flex: '1 1 110px',
+                        minHeight: '44px',
+                        padding: '5px 10px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '7px',
+                        outline: isSelected ? '2px solid #fff' : 'none',
+                      }}
+                      aria-pressed={isSelected}
+                    >
+                      {avatar && (
+                        <img
+                          src={avatar.dataUrl}
+                          alt={player.name}
+                          className="mc-pixelated"
+                          style={{
+                            width: '24px',
+                            height: '24px',
+                            border: `2px solid ${player.color || '#fff'}`,
+                            background: '#222',
+                            flexShrink: 0,
+                          }}
+                        />
+                      )}
+                      <span
+                        style={{
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {player.name}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Big Chunky Green Send Button */}
           <button
             type="submit"
+            disabled={!selectedRecipient}
             className="mc-btn mc-btn-green"
             style={{
               width: '100%',
@@ -751,10 +851,15 @@ export const ItemStudio: React.FC<ItemStudioProps> = ({
               alignItems: 'center',
               justifyContent: 'center',
               gap: '8px',
+              opacity: selectedRecipient ? 1 : 0.6,
             }}
           >
             <span style={{ fontSize: '19px' }}>🚀</span>
-            <span>SEND TO {otherPlayer.name.toUpperCase()}!</span>
+            <span>
+              {selectedRecipient
+                ? `SEND TO ${selectedRecipient.name.toUpperCase()}!`
+                : 'ADD ANOTHER PLAYER TO SEND'}
+            </span>
           </button>
         </form>
       </div>

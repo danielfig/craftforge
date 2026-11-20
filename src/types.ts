@@ -1,4 +1,5 @@
-export type PlayerId = 'player1' | 'player2';
+export type PlayerId = string;
+export type ItemAuthorId = PlayerId | 'neon';
 
 export interface PlayerProfile {
   id: PlayerId;
@@ -33,14 +34,15 @@ export interface CraftItem {
   rarity: ItemRarity;
   enchanted: boolean;
   pixels: string[]; // 256 entries (16x16), '' for transparent or '#rrggbb'
-  creatorId: PlayerId;
-  recipientId: PlayerId;
+  creatorId: ItemAuthorId;
+  recipientId: ItemAuthorId;
   createdAt: number;
   grade: number | null; // 0..10 integer, null if unrated
   gradeComment?: string;
   gradedAt?: number;
   hidden?: boolean;
   hiddenUpdatedAt?: number;
+  isDemo?: boolean;
 }
 
 export interface RealmState {

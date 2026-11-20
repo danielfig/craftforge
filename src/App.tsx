@@ -5,6 +5,7 @@ import {
   CloudSyncConfig,
   SyncStatus,
   generateItemId,
+  isDemoItem,
   loadActivePlayer,
   loadCloudConfig,
   loadRealmState,
@@ -40,6 +41,7 @@ export default function App() {
 
   // Cloud Sync Modal state
   const [showSyncModal, setShowSyncModal] = useState(false);
+  const [showPlayerMenu, setShowPlayerMenu] = useState(false);
   const [snippetInput, setSnippetInput] = useState('');
   const [projectIdInput, setProjectIdInput] = useState(cloudConfig.projectId);
   const [apiKeyInput, setApiKeyInput] = useState(cloudConfig.apiKey);
@@ -49,6 +51,19 @@ export default function App() {
   // Keep latest realm in a ref for async cloud sync merges
   const realmRef = useRef(realm);
   realmRef.current = realm;
+  const switcherRef = useRef<HTMLDivElement | null>(null);
+
+  // Close player switcher popover on outside click
+  useEffect(() => {
+    if (!showPlayerMenu) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (switcherRef.current && !switcherRef.current.contains(e.target as Node)) {
+        setShowPlayerMenu(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [showPlayerMenu]);
 
   // Persist realm to localStorage on every change
   useEffect(() => {
@@ -105,19 +120,27 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [cloudConfig, realm.realmCode, syncNow]);
 
-  const currentPlayer: PlayerProfile | null = activePlayerId ? realm.players[activePlayerId] : null;
-  const otherPlayerId: PlayerId = activePlayerId === 'player1' ? 'player2' : 'player1';
-  const otherPlayer: PlayerProfile = realm.players[otherPlayerId];
+  const currentPlayer: PlayerProfile | null =
+    activePlayerId && realm.players[activePlayerId] ? realm.players[activePlayerId] : null;
+  const otherPlayers = useMemo(
+    () => Object.values(realm.players).filter((p) => p.id !== activePlayerId),
+    [realm.players, activePlayerId]
+  );
 
-  const unratedCount = useMemo(() => {
-    if (!activePlayerId) return 0;
-    return realm.items.filter(
-      (item) => !item.hidden && item.recipientId === activePlayerId && item.grade === null
-    ).length;
-  }, [realm.items, activePlayerId]);
+  const unratedByPlayer = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const item of realm.items) {
+      if (!item.hidden && !isDemoItem(item) && item.grade === null) {
+        counts[item.recipientId] = (counts[item.recipientId] || 0) + 1;
+      }
+    }
+    return counts;
+  }, [realm.items]);
+
+  const unratedCount = activePlayerId ? unratedByPlayer[activePlayerId] || 0 : 0;
 
   const visibleItemCount = useMemo(
-    () => realm.items.filter((item) => !item.hidden).length,
+    () => realm.items.filter((item) => !item.hidden && !isDemoItem(item)).length,
     [realm.items]
   );
 
@@ -135,6 +158,7 @@ export default function App() {
     setRealm(nextRealm);
     setRealmCodeInput(cleanCode);
     setActivePlayerId(playerId);
+    setShowPlayerMenu(false);
     if (cloudConfig.enabled && cloudConfig.projectId) {
       void syncNow(cloudConfig, nextRealm);
     }
@@ -144,15 +168,21 @@ export default function App() {
     draft: Omit<
       CraftItem,
       'id' | 'realmCode' | 'creatorId' | 'recipientId' | 'createdAt' | 'grade' | 'gradeComment' | 'gradedAt'
-    >
+    >,
+    recipientId: PlayerId
   ) => {
     if (!activePlayerId) return;
+    const resolvedRecipient =
+      recipientId && realm.players[recipientId] && recipientId !== activePlayerId
+        ? recipientId
+        : otherPlayers[0]?.id;
+    if (!resolvedRecipient) return;
     const newItem: CraftItem = {
       ...draft,
       id: generateItemId(),
       realmCode: realm.realmCode,
       creatorId: activePlayerId,
-      recipientId: otherPlayerId,
+      recipientId: resolvedRecipient,
       createdAt: Date.now(),
       grade: null,
     };
@@ -169,11 +199,13 @@ export default function App() {
   };
 
   const handleGradeItem = (itemId: string, grade: number, comment: string) => {
+    const target = realm.items.find((item) => item.id === itemId);
+    if (!target || isDemoItem(target)) return;
     const clampedGrade = Math.max(0, Math.min(10, Math.round(grade)));
     const nextRealm: RealmState = {
       ...realm,
       items: realm.items.map((item) =>
-        item.id === itemId
+        item.id === itemId && !isDemoItem(item)
           ? {
               ...item,
               grade: clampedGrade,
@@ -193,10 +225,12 @@ export default function App() {
 
   const handleToggleHideItem = (itemId: string) => {
     if (!activePlayerId) return;
+    const target = realm.items.find((item) => item.id === itemId);
+    if (!target || isDemoItem(target) || target.creatorId !== activePlayerId) return;
     const nextRealm: RealmState = {
       ...realm,
       items: realm.items.map((item) =>
-        item.id === itemId && item.creatorId === activePlayerId
+        item.id === itemId && !isDemoItem(item) && item.creatorId === activePlayerId
           ? {
               ...item,
               hidden: !item.hidden,
@@ -222,13 +256,15 @@ export default function App() {
     }
   };
 
-  const handleQuickSwitchPlayer = () => {
+  const handleSwitchToPlayer = (targetId: PlayerId) => {
     playSound('click');
-    setActivePlayerId(otherPlayerId);
+    setActivePlayerId(targetId);
+    setShowPlayerMenu(false);
   };
 
   const handleBackToTitle = () => {
     playSound('click');
+    setShowPlayerMenu(false);
     setActivePlayerId(null);
   };
 
@@ -368,6 +404,42 @@ export default function App() {
         .cf-topbar-right .mc-btn {
           min-height: 44px;
           padding: 8px 12px;
+        }
+        .cf-switcher-wrap {
+          position: relative;
+        }
+        .cf-switcher-menu {
+          position: absolute;
+          top: calc(100% + 6px);
+          right: 0;
+          z-index: 950;
+          min-width: 220px;
+          padding: 8px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+        }
+        .cf-switcher-item {
+          width: 100%;
+          min-height: 44px;
+          padding: 6px 10px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          text-align: left;
+        }
+        .cf-switcher-item-left {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+        }
+        .cf-switcher-divider {
+          height: 2px;
+          background: #555;
+          margin: 2px 0;
         }
         .cf-tabs {
           width: 100%;
@@ -563,14 +635,72 @@ export default function App() {
             ☁ Sync
           </button>
 
-          <button
-            type="button"
-            className="mc-btn mc-btn-gold"
-            onClick={handleQuickSwitchPlayer}
-            title={`Quick switch to ${otherPlayer.name}`}
-          >
-            ⇄ {otherPlayer.name}
-          </button>
+          {otherPlayers.length === 1 ? (
+            <button
+              type="button"
+              className="mc-btn mc-btn-gold"
+              onClick={() => handleSwitchToPlayer(otherPlayers[0].id)}
+              title={`Quick switch to ${otherPlayers[0].name}`}
+            >
+              ⇄ {otherPlayers[0].name}
+            </button>
+          ) : otherPlayers.length > 1 ? (
+            <div className="cf-switcher-wrap" ref={switcherRef}>
+              <button
+                type="button"
+                className="mc-btn mc-btn-gold"
+                onClick={() => {
+                  playSound('click');
+                  setShowPlayerMenu((prev) => !prev);
+                }}
+                aria-expanded={showPlayerMenu}
+                aria-haspopup="menu"
+                title="Switch Player"
+              >
+                ⇄ Switch ({otherPlayers.length}) ▾
+              </button>
+
+              {showPlayerMenu && (
+                <div className="mc-panel-dark cf-switcher-menu" role="menu">
+                  {otherPlayers.map((p) => {
+                    const pUnrated = unratedByPlayer[p.id] || 0;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        role="menuitem"
+                        className="mc-btn cf-switcher-item"
+                        onClick={() => handleSwitchToPlayer(p.id)}
+                      >
+                        <span className="cf-switcher-item-left">
+                          <img
+                            src={getAvatarUrl(p.avatarId)}
+                            alt={p.name}
+                            className="mc-pixelated cf-avatar-mini"
+                          />
+                          <span className="cf-player-name" style={{ color: p.color }}>
+                            {p.name}
+                          </span>
+                        </span>
+                        {pUnrated > 0 && (
+                          <span className="mc-badge cf-unrated-badge">{pUnrated}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  <div className="cf-switcher-divider" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="mc-btn mc-btn-purple cf-switcher-item"
+                    onClick={handleBackToTitle}
+                  >
+                    👥 Manage Players
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
       </header>
 
@@ -620,14 +750,14 @@ export default function App() {
         {activeTab === 'studio' && (
           <ItemStudio
             currentPlayer={currentPlayer}
-            otherPlayer={otherPlayer}
+            otherPlayers={otherPlayers}
             onSendItem={handleSendItem}
           />
         )}
 
         {activeTab === 'inbox' && (
           <InboxGrader
-            items={realm.items.filter((item) => !item.hidden)}
+            items={realm.items.filter((item) => !item.hidden && !isDemoItem(item))}
             players={realm.players}
             currentPlayerId={activePlayerId}
             onGradeItem={handleGradeItem}

@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { CraftItem, ItemRarity, PlayerId, PlayerProfile } from '../types';
+import { CraftItem, ItemAuthorId, ItemRarity, PlayerId, PlayerProfile } from '../types';
 import { AVATARS, renderPixelsToDataUrl } from '../assets/textures';
+import { isDemoItem } from '../store/itemStore';
 import { playSound } from '../utils/sounds';
 
 export interface SharedChestProps {
@@ -10,8 +11,10 @@ export interface SharedChestProps {
   onToggleHideItem?: (itemId: string) => void;
 }
 
-type FilterMode = 'all' | 'graded' | 'pending' | 'player1' | 'player2' | 'hidden';
+type FilterMode = 'all' | 'graded' | 'pending' | 'hidden' | `player:${PlayerId}`;
 type SortMode = 'newest' | 'highest';
+
+const PLAYER_STAT_COLORS = ['#ffd700', '#55ffff', '#ff77ff', '#55ff55', '#ffaa00', '#ff6666'];
 
 const RARITY_COLORS: Record<ItemRarity, string> = {
   common: '#ffffff',
@@ -43,6 +46,13 @@ function getScoreBadgeStyle(grade: number): { bg: string; color: string; border:
   return { bg: '#444444', color: '#dddddd', border: '#999999' };
 }
 
+function getPlayerProfile(
+  players: Record<PlayerId, PlayerProfile>,
+  id: ItemAuthorId
+): PlayerProfile | undefined {
+  return id && id !== 'neon' ? players[id] : undefined;
+}
+
 function getAvatarUrl(avatarId: string): string {
   const found = AVATARS.find((a) => a.id === avatarId) || AVATARS[0];
   return found ? found.dataUrl : '';
@@ -71,53 +81,66 @@ export const SharedChest: React.FC<SharedChestProps> = ({
   const [sort, setSort] = useState<SortMode>('newest');
   const [inspectItemId, setInspectItemId] = useState<string | null>(null);
 
+  const playerList = useMemo(() => Object.values(players), [players]);
+
   const nonHiddenItems = useMemo(() => items.filter((i) => !i.hidden), [items]);
+  const nonDemoItems = useMemo(
+    () => nonHiddenItems.filter((i) => !isDemoItem(i)),
+    [nonHiddenItems]
+  );
   const myHiddenItems = useMemo(
-    () => items.filter((i) => i.hidden && i.creatorId === currentPlayerId),
+    () => items.filter((i) => !isDemoItem(i) && i.hidden && i.creatorId === currentPlayerId),
     [items, currentPlayerId]
   );
 
-  // If the user switches players or unhides their last hidden item, reset filter to 'all'
+  // Reset filter to 'all' if hidden empties or a filtered player was removed
   useEffect(() => {
     if (filter === 'hidden' && myHiddenItems.length === 0) {
       setFilter('all');
+    } else if (filter.startsWith('player:')) {
+      const targetId = filter.slice('player:'.length);
+      if (!players[targetId]) {
+        setFilter('all');
+      }
     }
-  }, [filter, myHiddenItems.length]);
+  }, [filter, myHiddenItems.length, players]);
 
-  // Compute top stats (excluding hidden items)
+  // Compute top stats (excluding hidden and starter demo items) dynamically for all players
   const stats = useMemo(() => {
-    const totalCrafted = nonHiddenItems.length;
-    const gradedItems = nonHiddenItems.filter((i) => i.grade !== null);
+    const totalCrafted = nonDemoItems.length;
+    const gradedItems = nonDemoItems.filter((i) => i.grade !== null);
     const gradedCount = gradedItems.length;
 
-    const avgForPlayer = (pid: PlayerId): string => {
-      const pGraded = gradedItems.filter((i) => i.creatorId === pid);
-      if (pGraded.length === 0) return '—';
-      const sum = pGraded.reduce((acc, i) => acc + (i.grade ?? 0), 0);
-      return (sum / pGraded.length).toFixed(1);
-    };
+    const avgByPlayer: Record<PlayerId, string> = {};
+    for (const p of playerList) {
+      const pGraded = gradedItems.filter((i) => i.creatorId === p.id);
+      if (pGraded.length === 0) {
+        avgByPlayer[p.id] = '—';
+      } else {
+        const sum = pGraded.reduce((acc, i) => acc + (i.grade ?? 0), 0);
+        avgByPlayer[p.id] = (sum / pGraded.length).toFixed(1);
+      }
+    }
 
     return {
       totalCrafted,
       gradedCount,
-      p1Avg: avgForPlayer('player1'),
-      p2Avg: avgForPlayer('player2'),
+      avgByPlayer,
     };
-  }, [nonHiddenItems]);
+  }, [nonDemoItems, playerList]);
 
-  // Filter & sort items
+  // Filter & sort items (starter demo items appear only in 'all')
   const visibleItems = useMemo(() => {
     let list = nonHiddenItems;
     if (filter === 'hidden') {
       list = myHiddenItems;
     } else if (filter === 'graded') {
-      list = nonHiddenItems.filter((i) => i.grade !== null);
+      list = nonDemoItems.filter((i) => i.grade !== null);
     } else if (filter === 'pending') {
-      list = nonHiddenItems.filter((i) => i.grade === null);
-    } else if (filter === 'player1') {
-      list = nonHiddenItems.filter((i) => i.creatorId === 'player1');
-    } else if (filter === 'player2') {
-      list = nonHiddenItems.filter((i) => i.creatorId === 'player2');
+      list = nonDemoItems.filter((i) => i.grade === null);
+    } else if (filter.startsWith('player:')) {
+      const targetId = filter.slice('player:'.length);
+      list = nonDemoItems.filter((i) => i.creatorId === targetId);
     }
 
     return [...list].sort((a, b) => {
@@ -128,7 +151,7 @@ export const SharedChest: React.FC<SharedChestProps> = ({
       }
       return b.createdAt - a.createdAt;
     });
-  }, [nonHiddenItems, myHiddenItems, filter, sort]);
+  }, [nonHiddenItems, nonDemoItems, myHiddenItems, filter, sort]);
 
   // Render crisp pixel art URLs once per items change
   const pixelUrls = useMemo(() => {
@@ -168,9 +191,6 @@ export const SharedChest: React.FC<SharedChestProps> = ({
     playSound('chest');
     setInspectItemId(itemId);
   };
-
-  const p1 = players.player1;
-  const p2 = players.player2;
 
   return (
     <div style={{ width: '100%', maxWidth: '1360px', margin: '0 auto' }}>
@@ -270,89 +290,54 @@ export const SharedChest: React.FC<SharedChestProps> = ({
           </div>
         </div>
 
-        {/* Player 1 Avg */}
-        <div
-          style={{
-            backgroundColor: 'rgba(0,0,0,0.35)',
-            border: `2px solid ${currentPlayerId === 'player1' ? '#55ff55' : '#444'}`,
-            padding: '10px 12px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '10px',
-          }}
-        >
-          <img
-            src={getAvatarUrl(p1.avatarId)}
-            alt={p1.name}
-            className="mc-pixelated"
-            style={{ width: '38px', height: '38px', imageRendering: 'pixelated' }}
-          />
-          <div>
+        {/* Dynamic Player Averages */}
+        {playerList.map((player, idx) => {
+          const avg = stats.avgByPlayer[player.id] ?? '—';
+          const scoreColor = PLAYER_STAT_COLORS[idx % PLAYER_STAT_COLORS.length];
+          return (
             <div
+              key={player.id}
               style={{
-                fontFamily: "'Silkscreen', monospace",
-                fontSize: '0.7rem',
-                color: '#d0d0d0',
+                backgroundColor: 'rgba(0,0,0,0.35)',
+                border: `2px solid ${currentPlayerId === player.id ? '#55ff55' : '#444'}`,
+                padding: '10px 12px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '10px',
               }}
             >
-              {p1.name} AVG
+              <img
+                src={getAvatarUrl(player.avatarId)}
+                alt={player.name}
+                className="mc-pixelated"
+                style={{ width: '38px', height: '38px', imageRendering: 'pixelated' }}
+              />
+              <div>
+                <div
+                  style={{
+                    fontFamily: "'Silkscreen', monospace",
+                    fontSize: '0.7rem',
+                    color: '#d0d0d0',
+                  }}
+                >
+                  {player.name} AVG
+                </div>
+                <div
+                  style={{
+                    fontFamily: "'Press Start 2P', monospace",
+                    fontSize: '1.08rem',
+                    color: scoreColor,
+                    marginTop: '3px',
+                  }}
+                >
+                  {avg}
+                  {avg !== '—' && <span style={{ fontSize: '0.7rem', color: '#aaa' }}>/10</span>}
+                </div>
+              </div>
             </div>
-            <div
-              style={{
-                fontFamily: "'Press Start 2P', monospace",
-                fontSize: '1.08rem',
-                color: '#ffd700',
-                marginTop: '3px',
-              }}
-            >
-              {stats.p1Avg}
-              {stats.p1Avg !== '—' && <span style={{ fontSize: '0.7rem', color: '#aaa' }}>/10</span>}
-            </div>
-          </div>
-        </div>
-
-        {/* Player 2 Avg */}
-        <div
-          style={{
-            backgroundColor: 'rgba(0,0,0,0.35)',
-            border: `2px solid ${currentPlayerId === 'player2' ? '#55ff55' : '#444'}`,
-            padding: '10px 12px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '10px',
-          }}
-        >
-          <img
-            src={getAvatarUrl(p2.avatarId)}
-            alt={p2.name}
-            className="mc-pixelated"
-            style={{ width: '38px', height: '38px', imageRendering: 'pixelated' }}
-          />
-          <div>
-            <div
-              style={{
-                fontFamily: "'Silkscreen', monospace",
-                fontSize: '0.7rem',
-                color: '#d0d0d0',
-              }}
-            >
-              {p2.name} AVG
-            </div>
-            <div
-              style={{
-                fontFamily: "'Press Start 2P', monospace",
-                fontSize: '1.08rem',
-                color: '#55ffff',
-                marginTop: '3px',
-              }}
-            >
-              {stats.p2Avg}
-              {stats.p2Avg !== '—' && <span style={{ fontSize: '0.7rem', color: '#aaa' }}>/10</span>}
-            </div>
-          </div>
-        </div>
+          );
+        })}
       </div>
 
       {/* Filter & Sort Bar */}
@@ -374,8 +359,10 @@ export const SharedChest: React.FC<SharedChestProps> = ({
               { id: 'all', label: 'All' },
               { id: 'graded', label: 'Graded' },
               { id: 'pending', label: 'Waiting for Grade' },
-              { id: 'player1', label: `By ${p1.name}` },
-              { id: 'player2', label: `By ${p2.name}` },
+              ...playerList.map((p) => ({
+                id: `player:${p.id}` as FilterMode,
+                label: `By ${p.name}`,
+              })),
               ...(myHiddenItems.length > 0
                 ? [{ id: 'hidden' as FilterMode, label: `🙈 Hidden (${myHiddenItems.length})` }]
                 : []),
@@ -479,9 +466,10 @@ export const SharedChest: React.FC<SharedChestProps> = ({
         ) : (
           <div className="cf-chest-grid">
             {visibleItems.map((item) => {
-              const creator = players[item.creatorId];
+              const demo = isDemoItem(item);
+              const creator = demo ? undefined : getPlayerProfile(players, item.creatorId);
               const rarityColor = RARITY_COLORS[item.rarity] || '#ffffff';
-              const isGraded = item.grade !== null;
+              const isGraded = !demo && item.grade !== null;
               const badgeStyle = isGraded ? getScoreBadgeStyle(item.grade as number) : null;
 
               return (
@@ -524,7 +512,21 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                       {item.rarity}
                     </span>
 
-                    {isGraded && badgeStyle ? (
+                    {demo ? (
+                      <span
+                        className="mc-badge"
+                        style={{
+                          backgroundColor: '#0e3a46',
+                          color: '#4aedf9',
+                          border: '2px solid #4aedf9',
+                          fontFamily: "'Silkscreen', monospace",
+                          fontSize: '0.64rem',
+                          padding: '3px 6px',
+                        }}
+                      >
+                        DEMO
+                      </span>
+                    ) : isGraded && badgeStyle ? (
                       <span
                         className="mc-badge"
                         style={{
@@ -610,26 +612,48 @@ export const SharedChest: React.FC<SharedChestProps> = ({
                       borderTop: '2px solid rgba(255,255,255,0.1)',
                     }}
                   >
-                    {creator && (
-                      <img
-                        src={getAvatarUrl(creator.avatarId)}
-                        alt={creator.name}
-                        className="mc-pixelated"
-                        style={{ width: '20px', height: '20px', imageRendering: 'pixelated' }}
-                      />
+                    {demo ? (
+                      <>
+                        <span style={{ color: '#4aedf9', fontSize: '0.95rem', lineHeight: 1 }}>
+                          ✦
+                        </span>
+                        <span
+                          style={{
+                            fontFamily: "'VT323', monospace",
+                            fontSize: '1.1rem',
+                            color: '#4aedf9',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}
+                        >
+                          Neon
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        {creator && (
+                          <img
+                            src={getAvatarUrl(creator.avatarId)}
+                            alt={creator.name}
+                            className="mc-pixelated"
+                            style={{ width: '20px', height: '20px', imageRendering: 'pixelated' }}
+                          />
+                        )}
+                        <span
+                          style={{
+                            fontFamily: "'VT323', monospace",
+                            fontSize: '1.1rem',
+                            color: '#cccccc',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}
+                        >
+                          {creator?.name || 'Crafter'}
+                        </span>
+                      </>
                     )}
-                    <span
-                      style={{
-                        fontFamily: "'VT323', monospace",
-                        fontSize: '1.1rem',
-                        color: '#cccccc',
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                      }}
-                    >
-                      {creator?.name || 'Crafter'}
-                    </span>
                   </div>
                 </button>
               );
@@ -772,148 +796,190 @@ export const SharedChest: React.FC<SharedChestProps> = ({
             </div>
 
             {/* Creator & Recipient Metadata */}
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                justifyContent: 'space-between',
-                gap: '10px',
-                fontFamily: "'VT323', monospace",
-                fontSize: '1.2rem',
-                color: '#cccccc',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <img
-                  src={getAvatarUrl(players[inspectItem.creatorId]?.avatarId || '')}
-                  alt={players[inspectItem.creatorId]?.name || 'Creator'}
-                  className="mc-pixelated"
-                  style={{ width: '24px', height: '24px', imageRendering: 'pixelated' }}
-                />
-                <span>
-                  Crafted by{' '}
-                  <strong style={{ color: '#55ff55' }}>
-                    {players[inspectItem.creatorId]?.name}
-                  </strong>
-                </span>
-              </div>
-              <span style={{ color: '#999999' }}>{formatDate(inspectItem.createdAt)}</span>
-            </div>
+            {(() => {
+              const inspectIsDemo = isDemoItem(inspectItem);
+              const inspectCreator = inspectIsDemo
+                ? undefined
+                : getPlayerProfile(players, inspectItem.creatorId);
+              const inspectRecipient = inspectIsDemo
+                ? undefined
+                : getPlayerProfile(players, inspectItem.recipientId);
 
-            {/* Grade & Comment Section */}
-            <div
-              style={{
-                borderTop: '2px solid rgba(255,255,255,0.15)',
-                paddingTop: '14px',
-              }}
-            >
-              {inspectItem.grade !== null ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              return (
+                <>
                   <div
                     style={{
                       display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
                       flexWrap: 'wrap',
+                      justifyContent: 'space-between',
                       gap: '10px',
+                      fontFamily: "'VT323', monospace",
+                      fontSize: '1.2rem',
+                      color: '#cccccc',
                     }}
                   >
-                    <span
-                      style={{
-                        fontFamily: "'Silkscreen', monospace",
-                        fontSize: '0.8rem',
-                        color: '#dddddd',
-                      }}
-                    >
-                      RATED BY {players[inspectItem.recipientId]?.name.toUpperCase()}
-                    </span>
-                    <span
-                      className="mc-badge"
-                      style={{
-                        backgroundColor: getScoreBadgeStyle(inspectItem.grade).bg,
-                        color: getScoreBadgeStyle(inspectItem.grade).color,
-                        border: `2px solid ${getScoreBadgeStyle(inspectItem.grade).border}`,
-                        fontFamily: "'Press Start 2P', monospace",
-                        fontSize: '0.88rem',
-                        padding: '6px 12px',
-                      }}
-                    >
-                      {inspectItem.grade}/10 • {GRADE_TITLES[inspectItem.grade] || 'Rated'}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      {inspectIsDemo ? (
+                        <>
+                          <span style={{ color: '#4aedf9', fontSize: '1.1rem', lineHeight: 1 }}>
+                            ✦
+                          </span>
+                          <span>
+                            Crafted by{' '}
+                            <strong style={{ color: '#4aedf9' }}>Neon</strong>
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <img
+                            src={getAvatarUrl(inspectCreator?.avatarId || '')}
+                            alt={inspectCreator?.name || 'Creator'}
+                            className="mc-pixelated"
+                            style={{ width: '24px', height: '24px', imageRendering: 'pixelated' }}
+                          />
+                          <span>
+                            Crafted by{' '}
+                            <strong style={{ color: '#55ff55' }}>
+                              {inspectCreator?.name}
+                            </strong>
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <span style={{ color: '#999999' }}>
+                      {inspectIsDemo ? 'Starter Demo' : formatDate(inspectItem.createdAt)}
                     </span>
                   </div>
 
-                  {inspectItem.gradeComment && (
+                  {/* Grade & Comment Section */}
+                  <div
+                    style={{
+                      borderTop: '2px solid rgba(255,255,255,0.15)',
+                      paddingTop: '14px',
+                    }}
+                  >
+                    {inspectIsDemo ? (
+                      <div
+                        style={{
+                          textAlign: 'center',
+                          fontFamily: "'Silkscreen', monospace",
+                          fontSize: '0.78rem',
+                          color: '#4aedf9',
+                          padding: '8px',
+                        }}
+                      >
+                        ✦ Starter Demo Item by Neon • View-only
+                      </div>
+                    ) : inspectItem.grade !== null ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            flexWrap: 'wrap',
+                            gap: '10px',
+                          }}
+                        >
+                          <span
+                            style={{
+                              fontFamily: "'Silkscreen', monospace",
+                              fontSize: '0.8rem',
+                              color: '#dddddd',
+                            }}
+                          >
+                            RATED BY {(inspectRecipient?.name || 'PARTNER').toUpperCase()}
+                          </span>
+                          <span
+                            className="mc-badge"
+                            style={{
+                              backgroundColor: getScoreBadgeStyle(inspectItem.grade).bg,
+                              color: getScoreBadgeStyle(inspectItem.grade).color,
+                              border: `2px solid ${getScoreBadgeStyle(inspectItem.grade).border}`,
+                              fontFamily: "'Press Start 2P', monospace",
+                              fontSize: '0.88rem',
+                              padding: '6px 12px',
+                            }}
+                          >
+                            {inspectItem.grade}/10 • {GRADE_TITLES[inspectItem.grade] || 'Rated'}
+                          </span>
+                        </div>
+
+                        {inspectItem.gradeComment && (
+                          <div
+                            style={{
+                              backgroundColor: 'rgba(85, 255, 85, 0.08)',
+                              borderLeft: '4px solid #55ff55',
+                              padding: '10px 12px',
+                              fontFamily: "'VT323', monospace",
+                              fontSize: '1.35rem',
+                              color: '#eaffea',
+                            }}
+                          >
+                            “{inspectItem.gradeComment}”
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          textAlign: 'center',
+                          fontFamily: "'Silkscreen', monospace",
+                          fontSize: '0.8rem',
+                          color: '#ffdd55',
+                          padding: '8px',
+                        }}
+                      >
+                        ⏳ Waiting for {inspectRecipient?.name || 'partner'} to rate (0–10)...
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Creator-Only Hide / Unhide Action (disabled for demo items) */}
+                  {onToggleHideItem && !inspectIsDemo && inspectItem.creatorId === currentPlayerId && (
                     <div
                       style={{
-                        backgroundColor: 'rgba(85, 255, 85, 0.08)',
-                        borderLeft: '4px solid #55ff55',
-                        padding: '10px 12px',
-                        fontFamily: "'VT323', monospace",
-                        fontSize: '1.35rem',
-                        color: '#eaffea',
+                        borderTop: '2px solid rgba(255,255,255,0.15)',
+                        paddingTop: '14px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        flexWrap: 'wrap',
+                        gap: '10px',
                       }}
                     >
-                      “{inspectItem.gradeComment}”
+                      <span
+                        style={{
+                          fontFamily: "'VT323', monospace",
+                          fontSize: '1.15rem',
+                          color: '#aaaaaa',
+                        }}
+                      >
+                        {inspectItem.hidden
+                          ? 'Hidden from Shared Chest & Inbox (still saved safely).'
+                          : 'Only you (the creator) can hide or unhide this item.'}
+                      </span>
+                      <button
+                        type="button"
+                        className={`mc-btn ${inspectItem.hidden ? 'mc-btn-green' : 'mc-btn-red'}`}
+                        onClick={() => {
+                          playSound('click');
+                          onToggleHideItem(inspectItem.id);
+                          setInspectItemId(null);
+                        }}
+                        style={{
+                          fontSize: '0.78rem',
+                          padding: '10px 16px',
+                          minHeight: '44px',
+                        }}
+                      >
+                        {inspectItem.hidden ? '👁 UNHIDE ITEM' : '🙈 HIDE ITEM'}
+                      </button>
                     </div>
                   )}
-                </div>
-              ) : (
-                <div
-                  style={{
-                    textAlign: 'center',
-                    fontFamily: "'Silkscreen', monospace",
-                    fontSize: '0.8rem',
-                    color: '#ffdd55',
-                    padding: '8px',
-                  }}
-                >
-                  ⏳ Waiting for {players[inspectItem.recipientId]?.name || 'partner'} to rate (0–10)...
-                </div>
-              )}
-            </div>
-
-            {/* Creator-Only Hide / Unhide Action */}
-            {onToggleHideItem && inspectItem.creatorId === currentPlayerId && (
-              <div
-                style={{
-                  borderTop: '2px solid rgba(255,255,255,0.15)',
-                  paddingTop: '14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  flexWrap: 'wrap',
-                  gap: '10px',
-                }}
-              >
-                <span
-                  style={{
-                    fontFamily: "'VT323', monospace",
-                    fontSize: '1.15rem',
-                    color: '#aaaaaa',
-                  }}
-                >
-                  {inspectItem.hidden
-                    ? 'Hidden from Shared Chest & Inbox (still saved safely).'
-                    : 'Only you (the creator) can hide or unhide this item.'}
-                </span>
-                <button
-                  type="button"
-                  className={`mc-btn ${inspectItem.hidden ? 'mc-btn-green' : 'mc-btn-red'}`}
-                  onClick={() => {
-                    playSound('click');
-                    onToggleHideItem(inspectItem.id);
-                    setInspectItemId(null);
-                  }}
-                  style={{
-                    fontSize: '0.78rem',
-                    padding: '10px 16px',
-                    minHeight: '44px',
-                  }}
-                >
-                  {inspectItem.hidden ? '👁 UNHIDE ITEM' : '🙈 HIDE ITEM'}
-                </button>
-              </div>
-            )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}

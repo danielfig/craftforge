@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { CraftItem, ItemRarity, PlayerId, PlayerProfile } from '../types';
+import { CraftItem, ItemAuthorId, ItemRarity, PlayerId, PlayerProfile } from '../types';
 import { AVATARS, renderPixelsToDataUrl } from '../assets/textures';
+import { isDemoItem } from '../store/itemStore';
 import { playSound } from '../utils/sounds';
 
 export interface InboxGraderProps {
@@ -49,6 +50,13 @@ const QUICK_NOTES = [
 
 const SCORE_OPTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
+function getPlayerProfile(
+  players: Record<PlayerId, PlayerProfile>,
+  id: ItemAuthorId
+): PlayerProfile | undefined {
+  return id && id !== 'neon' ? players[id] : undefined;
+}
+
 function getAvatarUrl(avatarId: string): string {
   const found = AVATARS.find((a) => a.id === avatarId) || AVATARS[0];
   return found ? found.dataUrl : '';
@@ -79,7 +87,13 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
   const unratedItems = useMemo(
     () =>
       items
-        .filter((item) => item.recipientId === currentPlayerId && item.grade === null)
+        .filter(
+          (item) =>
+            !isDemoItem(item) &&
+            !item.hidden &&
+            item.recipientId === currentPlayerId &&
+            item.grade === null
+        )
         .sort((a, b) => b.createdAt - a.createdAt),
     [items, currentPlayerId]
   );
@@ -112,8 +126,12 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
     return map;
   }, [unratedItems]);
 
-  const otherPlayerId: PlayerId = currentPlayerId === 'player1' ? 'player2' : 'player1';
-  const otherPlayer = players[otherPlayerId];
+  const otherPlayers = useMemo(
+    () => Object.values(players).filter((p) => p.id !== currentPlayerId),
+    [players, currentPlayerId]
+  );
+  const emptyPartnerLabel =
+    otherPlayers.length === 1 ? otherPlayers[0].name : 'another crafter';
 
   const handleSelectItem = (itemId: string) => {
     playSound('chest');
@@ -275,7 +293,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
               maxWidth: '500px',
             }}
           >
-            When {otherPlayer?.name || 'your partner'} crafts something new for you, it will
+            When {emptyPartnerLabel} crafts something new for you, it will
             appear here as a glowing chest ready for your 0–10 rating.
           </p>
         </div>
@@ -285,7 +303,7 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
           {/* LEFT: Unrated Glowing Chest Queue */}
           <div className="cf-inbox-list">
             {unratedItems.map((item) => {
-              const creator = players[item.creatorId];
+              const creator = getPlayerProfile(players, item.creatorId);
               const creatorAvatar = creator ? getAvatarUrl(creator.avatarId) : '';
               const rarityColor = RARITY_COLORS[item.rarity] || '#ffffff';
               const isActive = selectedItem?.id === item.id;
@@ -579,15 +597,22 @@ export const InboxGrader: React.FC<InboxGraderProps> = ({
                       color: '#55ff55',
                     }}
                   >
-                    {players[selectedItem.creatorId] && (
-                      <img
-                        src={getAvatarUrl(players[selectedItem.creatorId].avatarId)}
-                        alt={players[selectedItem.creatorId].name}
-                        className="mc-pixelated"
-                        style={{ width: '24px', height: '24px', imageRendering: 'pixelated' }}
-                      />
-                    )}
-                    <span>Crafted by {players[selectedItem.creatorId]?.name || 'Crafter'}</span>
+                    {(() => {
+                      const selectedCreator = getPlayerProfile(players, selectedItem.creatorId);
+                      return (
+                        <>
+                          {selectedCreator && (
+                            <img
+                              src={getAvatarUrl(selectedCreator.avatarId)}
+                              alt={selectedCreator.name}
+                              className="mc-pixelated"
+                              style={{ width: '24px', height: '24px', imageRendering: 'pixelated' }}
+                            />
+                          )}
+                          <span>Crafted by {selectedCreator?.name || 'Crafter'}</span>
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
